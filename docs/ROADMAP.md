@@ -27,11 +27,12 @@
 | 0016 | D3D12 呈现导入器（Windows 零拷贝） | 呈现 | 已搬入、适配层就位、交叉编译通过；**真机运行待做**（见 `docs/platform-port.md`） |
 | 0017 | Vulkan dma-buf 导入器与随包 Vulkan Layer（Linux 零拷贝） | 呈现 | 已搬入、适配层就位、交叉编译通过（含随包 Layer 产物）；**真机运行待做**（见 `docs/platform-port.md`） |
 | 0018 | `VideoStream` / `VideoStreamPlayback` / 资源加载器 | Godot | ✅ 已完成：播放端到端验证、资源加载器、分辨率变化重建、纹理直给；单块交织纹理分支无生产者（明确报错并留档） |
-| 0019 | 信号与重连状态机（把 GDScript 里那 150 行搬进扩展） | Godot | 信号、状态上报与统计已完成并验证；**重连动作与参数属性待做**（跨线程重开需调度器配合） |
+| 0019 | 信号与重连状态机（把 GDScript 里那 150 行搬进扩展） | Godot | ✅ 已完成：信号（state_changed / frame_ready / stats_updated）、get_state/get_stats、重连动作（调度器的重开请求入口）、停滞/重连参数可调 |
 | 0020 | 纹理直给（`stream.texture`） | Godot | ✅ 已完成（`stream.get_texture()`，自检断言与播放器拿到的纹理同一块） |
 | 0021 | 打包、许可与发布产物 | 交付 | 打包/许可脚本与门槛已就位；**LGPL FFmpeg 已实测编成、许可门槛转绿**（见 `docs/licensing.md`） |
-| 0022 | 修 gdzig 类实例泄漏与 headless 导入崩溃 | Godot | 已定位，未修复（见 `docs/features/0022-gdzig-instance-leak.md`） |
+| 0022 | 修 gdzig 类实例泄漏与 headless 导入崩溃 | Godot | 部分修复：我们自己的类不再泄漏、退出崩溃已修；**残余**是一小组 RD 辅助对象，已量化并定位到"少数调用点"（见 `docs/features/0022-gdzig-instance-leak.md`） |
 | 0023 | HDR 传输函数与色调映射（PQ / HLG / BT.2020→BT.709） | core | ✅ 已完成（13 项测试；着色器接线待呈现那一步） |
+| 0024 | 接上 MediaClock 与重连后的 reanchor | core+Godot | 待做（0001 里已有只向前的 reanchor；重连后源的 PTS 会从头开始，实测会触发单调性告警） |
 
 ## 说明
 
