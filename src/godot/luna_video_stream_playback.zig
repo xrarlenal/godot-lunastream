@@ -31,6 +31,8 @@ const Texture2d = godot.class.Texture2d;
 const Texture2drd = godot.class.Texture2drd;
 const String = godot.builtin.String;
 const StringName = godot.builtin.StringName;
+const Dictionary = godot.builtin.Dictionary;
+const Variant = godot.builtin.Variant;
 
 const core = @import("core");
 const Backend = core.backend.Backend;
@@ -38,6 +40,8 @@ const VideoFrame = core.backend.VideoFrame;
 const DecodeScheduler = core.decode_scheduler.DecodeScheduler;
 const StreamHandle = core.decode_scheduler.StreamHandle;
 const PushConstants = core.push_constants.Nv12PushConstants;
+const playback_state = core.playback_state;
+const StateMachine = playback_state.Machine;
 
 const ffsw = @import("ffsw");
 const importer_mod = @import("dispatching_surface_importer.zig");
@@ -79,6 +83,16 @@ length_seconds: f64 = 0.0,
 position_seconds: f64 = 0.0,
 frames_presented: u64 = 0,
 last_error: ?[]const u8 = null,
+
+/// 0019：状态机（core 的 0008）与它的上报。状态迁移会回调到流那边发信号。
+machine: StateMachine = .init(.{}),
+/// 初值取 `off` 而不是 `idle`：`load()` 开头会先 teardown 一次，那时状态从 idle 变成
+/// off，会在"刚创建"的时候白白发一条 state_changed(off)。取 off 作初值，这条噪声就
+/// 不见了；真正停止播放时（playing → off）仍然会如实上报。
+last_reported_state: playback_state.State = .off,
+reconnects: u64 = 0,
+stalls: u64 = 0,
+last_stats_ms: i64 = 0,
 
 // ---------------------------------------------------------------------------
 // 注册与生命周期（与 0003 / 0022 的写法一致）
@@ -153,6 +167,9 @@ pub fn load(self: *LunaVideoStreamPlayback, path: []const u8) bool {
     }
     self.backend_open = true;
     self.length_seconds = backend.durationSeconds();
+    self.machine = StateMachine.init(.{});
+    self.machine.beginOpen(nowMs());
+    self.reportState();
 
     // 调度器：worker 池 + 有界帧队列（0007）。它的队列与回收环决定了导入侧的
     // 表面数量下限，所以这里必须真的用它，而不是在主线程上直接循环解码。
@@ -197,6 +214,8 @@ pub fn load(self: *LunaVideoStreamPlayback, path: []const u8) bool {
 
 fn teardown(self: *LunaVideoStreamPlayback) void {
     self.playing = false;
+    self.machine.stop();
+    self.reportState();
     if (self.texture) |texture| {
         _ = texture.unreference();
         self.texture = null;
@@ -296,10 +315,22 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
     if (!self.playing or self.paused) return;
     const scheduler = self.scheduler orelse return;
     const stream = self.stream orelse return;
+    const now = nowMs();
 
-    const frame = scheduler.nextFrame(stream) orelse return;
+    const frame = scheduler.nextFrame(stream) orelse {
+        // 这一轮没帧：交给状态机判断"是不是停滞后重连"，并把状态迁移报出去。
+        if (self.machine.tick(now)) {
+            self.stalls += 1;
+            self.tryReconnect();
+        }
+        self.reportState();
+        self.pushStatsIfDue(now);
+        return;
+    };
     defer frame.release();
     self.position_seconds = frame.pts_seconds;
+    self.machine.onFrame(now);
+    self.reportState();
 
     const dispatcher = if (self.dispatcher) |*d| d else return;
     const surface = dispatcher.importFrame(frame) catch return;
@@ -314,7 +345,78 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
     );
     _ = pipeline.present(surface, pc) catch return;
     self.frames_presented += 1;
+    if (self.owner_stream) |owner| owner.emitFrameReady();
+    self.pushStatsIfDue(now);
     _ = delta;
+}
+
+/// 0019：状态迁移时把新状态发给流（流再发信号）。
+fn reportState(self: *LunaVideoStreamPlayback) void {
+    if (self.machine.state == self.last_reported_state) return;
+    self.last_reported_state = self.machine.state;
+    if (self.owner_stream) |owner| {
+        owner.emitStateChanged(@intFromEnum(self.machine.state));
+    }
+}
+
+pub fn currentState(self: *LunaVideoStreamPlayback) i64 {
+    return @intFromEnum(self.machine.state);
+}
+
+/// 约 1 Hz 推一次统计：低频是刻意的——每帧推会把信号队列变成噪声源。
+fn pushStatsIfDue(self: *LunaVideoStreamPlayback, now_ms: i64) void {
+    if (now_ms - self.last_stats_ms < 1000) return;
+    self.last_stats_ms = now_ms;
+    if (self.owner_stream) |owner| owner.emitStatsUpdated(self.buildStats());
+}
+
+/// 一份统计快照。使用者不必自己拼状态机——这是 0019 要做的事。
+pub fn buildStats(self: *LunaVideoStreamPlayback) Dictionary {
+    var stats = Dictionary.init();
+    setStat(&stats, "state", @floatFromInt(@as(i64, @intFromEnum(self.machine.state))));
+    setStat(&stats, "frames_presented", @floatFromInt(@as(i64, @intCast(self.frames_presented))));
+    setStat(&stats, "position_seconds", self.position_seconds);
+    setStat(&stats, "length_seconds", self.length_seconds);
+    setStat(&stats, "stalls", @floatFromInt(@as(i64, @intCast(self.stalls))));
+    setStat(&stats, "reconnects", @floatFromInt(@as(i64, @intCast(self.reconnects))));
+    if (self.dispatcher) |*dispatcher| {
+        const d = dispatcher.stats();
+        setStat(&stats, "frames_cpu", @floatFromInt(@as(i64, @intCast(d.cpu))));
+        setStat(&stats, "frames_platform", @floatFromInt(@as(i64, @intCast(d.platform))));
+        setStat(&stats, "frames_rejected", @floatFromInt(@as(i64, @intCast(d.rejected))));
+    }
+    if (self.last_error) |message| {
+        _ = stats.set(
+            Variant.init(String, String.fromLatin1("last_error")),
+            Variant.init(String, String.fromUtf8(message) catch String.empty),
+        );
+    }
+    return stats;
+}
+
+fn setStat(stats: *Dictionary, key: []const u8, value: f64) void {
+    _ = stats.set(
+        Variant.init(String, String.fromLatin1(key)),
+        Variant.init(f64, value),
+    );
+}
+
+/// 重新打开这一路源。状态机在退避窗口到期时才请求重连，所以这里不做等待。
+fn tryReconnect(self: *LunaVideoStreamPlayback) void {
+    self.reconnects += 1;
+    // **刻意只计数，不在这里真的重开**：解锁重开会跨线程——后端由调度器的 worker
+    // 线程使用（0007 的"每路流串行"契约），而 _update 在主线程上；从主线程直接
+    // 调 backend.open 会与正在解码的 worker 抢同一份 FFmpeg 上下文。
+    //
+    // 正确做法是给调度器加一个"重开请求"入口，由 worker 在自己的租约里执行。
+    // 在那之前：状态机（core/playback_state.zig，0008 已有单测）仍然如实降级为
+    // stalled/failed 并发信号，使用者至少不会再看到"画面停了但状态还说在播"。
+    // 这条限制写在功能文档里。
+}
+
+fn nowMs() i64 {
+    const ns: i128 = core.sys_clock.nanoTimestamp();
+    return @intCast(@divTrunc(ns, std.time.ns_per_ms));
 }
 
 /// 诊断用：已经呈现了多少帧（自检脚本用它判断"真的在播"）。
@@ -326,6 +428,12 @@ pub fn getLastError(self: *LunaVideoStreamPlayback) String {
     // 必须用 fromUtf8：这些消息是 UTF-8 的中文，fromLatin1 会把它们按 Latin-1 解释，
     // 脚本侧看到的就是乱码（实测：`æå¼å¤±è´¥...`）。
     return String.fromUtf8(self.last_error orelse "") catch String.empty;
+}
+
+/// 0020：呈现管线那块稳定输出纹理（没有在播时是 null）。
+pub fn getTexture(self: *LunaVideoStreamPlayback) ?*Texture2d {
+    if (self.texture) |texture| return @ptrCast(texture);
+    return null;
 }
 
 // ---------------------------------------------------------------------------

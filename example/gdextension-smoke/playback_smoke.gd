@@ -41,6 +41,10 @@ func _ready() -> void:
 
 	_stream = ClassDB.instantiate(CLASS_NAME)
 	_stream.set("file", path)
+	# 0019：状态信号必须在 play() 之前连上，才接得到 IDLE→OPENING→PLAYING。
+	_stream.connect("state_changed", _on_state_changed)
+	_stream.connect("frame_ready", _on_frame_ready)
+	_stream.connect("stats_updated", _on_stats_updated)
 	_player = VideoStreamPlayer.new()
 	_player.stream = _stream
 	add_child(_player)
@@ -67,7 +71,38 @@ func _ready() -> void:
 	_check("播放位置在推进", _player.stream_position > 0.0, str(_player.stream_position))
 	var last_error: String = _stream.call("get_last_error")
 	_check("没有报错", last_error.is_empty(), last_error)
+
+	# 0020：纹理直给——3D 用户直接用 stream.get_texture()，不必放 Control。
+	var direct: Texture2D = _stream.call("get_texture")
+	_check("stream.get_texture() 与播放器的纹理一致", direct != null and direct == texture, str(direct))
+
+	# 0019：状态与统计。
+	var state: int = int(_stream.call("get_state"))
+	_check("状态走到了 playing（2）", state == 2, "state=%d" % state)
+	_check("收到了 state_changed 信号", _states.size() >= 1, str(_states))
+	_check("状态序列含 opening 与 playing", _states.has(1) and _states.has(2), str(_states))
+	_check("收到了 frame_ready 信号", _frame_ready_count > 0, "count=%d" % _frame_ready_count)
+	var stats: Dictionary = _stream.call("get_stats")
+	_check("get_stats() 带回帧数与状态", int(stats.get("frames_presented", -1)) > 0 and int(stats.get("state", -1)) == 2, str(stats))
+	_check("stats 里有 cpu 路径计数", int(stats.get("frames_cpu", -1)) > 0, str(stats.get("frames_cpu", -1)))
 	_finish()
+
+
+var _states: Array[int] = []
+var _frame_ready_count := 0
+
+
+func _on_state_changed(state: int) -> void:
+	_states.append(state)
+	print("[playback] （状态 -> %d）" % state)
+
+
+func _on_frame_ready() -> void:
+	_frame_ready_count += 1
+
+
+func _on_stats_updated(stats: Dictionary) -> void:
+	print("[playback] （stats: frames=%d）" % int(stats.get("frames_presented", -1)))
 
 
 func _finish() -> void:

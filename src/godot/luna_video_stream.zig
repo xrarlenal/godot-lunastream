@@ -23,6 +23,9 @@ const VideoStream = godot.class.VideoStream;
 const VideoStreamPlayback = godot.class.VideoStreamPlayback;
 const String = godot.builtin.String;
 const StringName = godot.builtin.StringName;
+const Dictionary = godot.builtin.Dictionary;
+const Variant = godot.builtin.Variant;
+const Texture2d = godot.class.Texture2d;
 
 const core = @import("core");
 const LunaVideoStreamPlayback = @import("luna_video_stream_playback.zig");
@@ -60,10 +63,77 @@ pub fn register(r: *Registry) void {
     // 为什么不问 VideoStreamPlayer：Godot 4.6 没有暴露 get_stream_playback()。
     class.addMethod("get_frames_presented", .auto);
     class.addMethod("get_last_error", .auto);
+    // 0020：纹理直给。`stream.get_texture()` 拿到的就是呈现管线那块**稳定**的输出纹理，
+    // 于是 3D 用户可以直接 `material.set_shader_parameter("video", stream.get_texture())`，
+    // 不必为了拿纹理先往场景树里放一个 Control。
+    class.addMethod("get_texture", .auto);
+    // 0019：状态与统计（把 GDScript 里那 150 行样板搬进扩展的那一半）。
+    class.addMethod("get_state", .auto);
+    class.addMethod("get_stats", .auto);
+    class.addMethod("emit_state_changed", .auto);
+    class.addMethod("emit_frame_ready", .auto);
+    class.addMethod("emit_stats_updated", .auto);
+    // 信号的名字来自**结构体名**（gdzig 用 casez 的 signal 规则转换），字段就是参数。
+    class.addSignal(StateChanged);
+    class.addSignal(FrameReady);
+    class.addSignal(StatsUpdated);
     class.addProperty("decoder", .{
         .hint = .property_hint_enum,
         .hint_string = String.fromLatin1("auto,hardware,software"),
     });
+}
+
+// ---------------------------------------------------------------------------
+// 信号（0019）
+//
+// 为什么信号挂在**流**上：GDScript 用户手里拿的是流（放进 VideoStreamPlayer 的那个
+// 资源），而播放实现是引擎内部创建的——所以状态变化由播放实现回调到流，再从这里发出。
+// ---------------------------------------------------------------------------
+
+/// `state_changed(state)`：状态机每次迁移都发一次（IDLE/OPENING/PLAYING/STALLED/
+/// FAILED/OFF，数值与 core.playback_state.State 一致）。
+pub const StateChanged = struct { state: i64 };
+/// `frame_ready()`：新的一帧被呈现（首帧与后续每帧都会发）。
+pub const FrameReady = struct {};
+/// `stats_updated(stats)`：低频（约 1 Hz）推送一份统计。
+pub const StatsUpdated = struct { stats: Dictionary };
+
+pub fn emitStateChanged(self: *LunaVideoStream, state: i64) void {
+    _ = self.base.call(StringName.fromLatin1("emit_signal", true), .{
+        Variant.init(String, String.fromLatin1("state_changed")),
+        Variant.init(i64, state),
+    });
+}
+
+pub fn emitFrameReady(self: *LunaVideoStream) void {
+    _ = self.base.call(StringName.fromLatin1("emit_signal", true), .{
+        Variant.init(String, String.fromLatin1("frame_ready")),
+    });
+}
+
+pub fn emitStatsUpdated(self: *LunaVideoStream, stats: Dictionary) void {
+    _ = self.base.call(StringName.fromLatin1("emit_signal", true), .{
+        Variant.init(String, String.fromLatin1("stats_updated")),
+        Variant.init(Dictionary, stats),
+    });
+}
+
+/// 当前状态（与 core 的 State 数值一致）。
+pub fn getState(self: *LunaVideoStream) i64 {
+    if (self.last_playback) |playback| return playback.currentState();
+    return 0; // idle
+}
+
+/// 一份统计快照。使用者不必自己拼状态机——这是 0019 的目标。
+pub fn getStats(self: *LunaVideoStream) Dictionary {
+    if (self.last_playback) |playback| return playback.buildStats();
+    return Dictionary.init();
+}
+
+/// 0020：呈现管线那块稳定输出纹理。没有在播时返回 null。
+pub fn getTexture(self: *LunaVideoStream) ?*Texture2d {
+    if (self.last_playback) |playback| return playback.getTexture();
+    return null;
 }
 
 /// 最近一路流已经呈现的帧数；没有播放实例时是 0。
