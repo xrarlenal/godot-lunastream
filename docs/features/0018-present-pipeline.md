@@ -51,37 +51,38 @@ RGBA8 输出纹理**（`storage` + `sampling`，可选 `can_copy_from` 供自检
 `(luma, chroma)` 缓存 uniform set（软解导入器复用纹理，命中率高），以及 `present()`
 的完整派发序列。
 
-## 已知问题：着色器在引擎里编不过（本步的卡点）
+## 排查记录：着色器在引擎里编不过（**已解决**）
 
-自检里那两段（`checkPresentPipeline` / `verifyPresentOutput`）**已经写好但暂未接入
-判据**，因为实测：
+第一版在引擎里报：
 
 ```
 ERROR: Can't create a shader from an errored bytecode. Check errors in source bytecode.
-[importer] FAIL 建呈现管线（ShaderCompileFailed）
 ```
 
-即 `shaderCompileSpirvFromSource` 返回的对象里 compute 阶段带着编译错误。已经做过的
-排查与排除：
+**根因：着色器源码里不能写 `#[compute]`。** 那是 Godot 的 Shader 资源（GDShader）那套
+的写法；而 `RenderingDevice.shaderCompileSpirvFromSource` 会把源码**原样**交给 glslang，
+glslang 不认这个标记，于是在第一行就报预处理错误——Godot 只把它塞进
+`RdShaderSpirv` 的阶段错误里，对外只剩上面那句没头没尾的话。
 
-| 项 | 结果 |
-|---|---|
-| `#[compute]` / `#version 450` 的位置 | 已提到文件最前两行（原先在一串注释之后），**仍然失败** |
-| 错误信息 | Godot 不把 GLSL 报错打到 stderr；`RdShaderSpirv.getStageCompileError()` 返回的是 gdzig 的 `String`，而它**没有到切片的转换入口**，所以拿不到具体文本 |
-| 自检环境 | 呈现管线目前建在**本地** RenderingDevice 上（0013 的读回限制所致）——"本地设备是否带 glslang"是下一个要排除的假设 |
+定位它的关键一步不是改代码，而是**换一个能看到报错的编译器**：本机有
+`glslangValidator`（Homebrew 装的），把同一份 GLSL 去掉首行标记后交给它：
 
-**下一步（按顺序）**：
+```bash
+tail -n +2 src/shaders/nv12_to_rgba.comp > /tmp/nv12.comp
+glslangValidator -V --target-env vulkan1.1 /tmp/nv12.comp   # 通过
+```
 
-1. 拿到 Godot 的 GLSL 报错文本。两条路：给 `String` 补一个到切片的转换（例如经
-   `PackedByteArray`），或在 Godot 编辑器里手工编同一份 `.comp` 看报错。
-2. 按报错修 GLSL；若确认是"本地设备没有 glslang"，则把呈现管线建在主设备上，
-   另外解决"主设备的输出纹理读不回来"（0013 已经记录过这个限制）——可能要改成
-   "在主设备上跑 compute、经 texture_copy 拷到本地设备读回"。
-3. 接线后重新跑 `zig build godot-importer-selftest`，并把这两段从 `comptime` 引用
-   改回真正的判据。
+glslang 说 GLSL 本身没问题 → 差异只可能在我喂给引擎的那份文本与它不同 → 只差
+`#[compute]` 一行 → 去掉即通过。
 
-在这之前，**不把这两段算作通过**：`RESULT=PASS` 里没有它们的位置（代码仍参与编译，
-接口一变就会红）。
+顺带记两条这次的教训：
+
+- `RdShaderSpirv.getStageCompileError()` 返回的是 gdzig 的 `String`，它**没有到切片的
+  转换入口**（`toUtf8Buffer()` / `toAsciiBuffer()` 返回 `PackedByteArray`，再经
+  `indexConst(0)` 才拿得到字节）。要长期依赖这条报错，得先把这段转换写上。
+- 期间还试过"把 `#[compute]` 与 `#version` 提到最前两行"——那是个**错误假设**，
+  失败原因与位置无关。留下这条是为了说明：报错文本拿不到时，改代码就是掷骰子，
+  先换能说话的编译器才是对的。
 
 ## 验证状态
 
@@ -89,10 +90,25 @@ ERROR: Can't create a shader from an errored bytecode. Check errors in source by
 |---|---|
 | 推送常量与色彩层的一致性 | ✅ 单测覆盖（`zig build test`） |
 | 着色器与推送常量的 ABI | ✅ 单测覆盖（4 项） |
-| 引擎内 GLSL→SPIR-V | ❌ **未通过**（见上） |
-| 端到端出画（读回 RGBA 与 core 期望比对） | ⏸ 代码已写好，待上面两条解决后接入判据 |
+| 引擎内 GLSL→SPIR-V | ✅ 通过（去掉 `#[compute]` 之后） |
+| 稳定输出纹理（RID 跨帧不变） | ✅ 自检断言 |
+| 端到端出画（读回 RGBA 与 core 期望比对） | ✅ **逐像素一致，最大偏差 0/255** |
 
 ```bash
 zig build test                        # 138/138（128 core + 6 ffsw ABI + 4 着色器 ABI）
-zig build godot-importer-selftest     # 43/43（0013/0014/0015 的既有检查，未受影响）
+zig build godot-importer-selftest     # 53/53（新增 10 项：呈现管线 6 项 + 读回比对）
 ```
+
+自检用的图案是"亮度渐变 + 色度恒为中性 128"：色度常量经过任何线性滤波还是它自己，
+所以 GLSL 里那步 4:2:0 双线性上采样不引入不确定量，每个像素的期望值能在 Zig 侧用
+core 的色彩层精确算出来。于是这两条断言同时钉住：**中性灰在整条管线上不偏色**，
+以及**逐像素亮度与 core 的数学一致**。
+
+## 还差什么（本功能点尚未完成）
+
+- `VideoStreamPlayback` 的接线：把"解码调度 → 导入 → 呈现"串起来，实现 `_play` /
+- `_stop` / `_get_texture` 等虚函数，`VideoStreamPlayer` 才真的能播。
+- 资源加载器：`file = "rtsp://..."` 这类 URL 的识别与文档化。
+- 目前呈现只支持"两块平面"（`luma_chroma`）；平台路径若只给一块交织纹理
+  （`interleaved_single`）还没有对应的着色器分支。
+- 分辨率变化时还没有重建管线（现在假设尺寸固定）。

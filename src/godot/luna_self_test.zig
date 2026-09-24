@@ -205,6 +205,7 @@ pub fn run(self: *LunaSelfTest) String {
         self.checkPoolSemantics(&report);
         self.checkDispatcher(&report);
         self.checkMetalImport(&report);
+        self.checkPresentPipeline(&report);
     }
 
     report.note("TOTAL_FAILURES={d}", .{report.failures});
@@ -901,15 +902,4 @@ fn equalBytes(got: PackedByteArray, want: []const u8) bool {
     if (want.len == 0) return true;
     const base: [*]const u8 = @ptrFromInt(@intFromPtr(got.indexConst(0)));
     return std.mem.eql(u8, base[0..want.len], want);
-}
-
-// 呈现管线的两段自检**暂未接入判据**，原因见 docs/features/0018-present-pipeline.md
-// 的"已知问题"：着色器在引擎内的 GLSL→SPIR-V 这一步没通过，而 gdzig 的 String 没有
-// 到切片的转换入口，取不到 Godot 给出的具体报错。
-//
-// 这里取一次函数地址是刻意的：这样这两段代码仍然**参与编译**（接口一变就会红），
-// 又不会把已知失败混进 RESULT=PASS 里。
-comptime {
-    _ = &checkPresentPipeline;
-    _ = &verifyPresentOutput;
 }

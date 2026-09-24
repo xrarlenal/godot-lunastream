@@ -1,4 +1,3 @@
-#[compute]
 #version 450
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -9,8 +8,13 @@ layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 // core/color.zig 里定义一次）。代价是推送常量稍大（48 字节），收益是 CPU 与 GPU
 // 的数学不会各自漂移。
 //
-// `#[compute]` 与 `#version` 必须是前两行：Godot 的 GLSL 前端在这里做识别，前面
-// 放注释就会报出与真实原因无关的编译错误（这一版被绊了一次）。
+// **不要在这里写 `#[compute]`**：那是 Godot 的 Shader 资源（GDShader）那套的写法，
+// 而 `RenderingDevice.shaderCompileSpirvFromSource` 会把源码**原样**交给 glslang，
+// glslang 不认这个标记，于是只会得到一句没头没尾的
+// "Can't create a shader from an errored bytecode"（这一版被它绊了一整轮）。
+// 本机有 glslangValidator，用它复核最快：
+//   tail -n +1 src/shaders/nv12_to_rgba.comp > /tmp/x.comp
+//   glslangValidator -V --target-env vulkan1.1 /tmp/x.comp
 
 layout(set = 0, binding = 0) uniform sampler2D luma_tex;
 layout(set = 0, binding = 1) uniform sampler2D chroma_tex;
