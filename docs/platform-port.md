@@ -1,6 +1,7 @@
 # 平台导入器的移植说明（0016 / 0017）
 
-> 状态：**代码已搬入，接缝适配与目标平台交叉编译待做。**
+> 状态：**代码已搬入，Zig/C 两侧已能为两个目标平台交叉编译通过；适配层与随包 Layer
+> 的产物接线、以及真机运行仍未做。**
 
 ## 为什么是"搬"而不是"重写"
 
@@ -81,14 +82,47 @@ macOS 那两步（0013 CPU 导入器、0015 Metal 导入器）**没有**放宽�
    macOS 上把 Zig 侧与 C 侧编过一遍（Zig 自带 mingw-w64 头，Windows 侧可用；
    Linux 侧的 VAAPI/Vulkan 头是否齐备要实测）。
 
+### 已经做完的（本步）
+
+- **模块接线**：`src/win/root.zig` 作为 Windows 模块挂上（去掉 `mf` 子模块）；
+  平台导入器对 `surface_importer.zig` 的引用指向 `platform_surface.zig`（源工程那份
+  词汇表，逐字节搬入）——接缝处将来加一层适配，而不是把它们改写进本仓库 0014 的
+  词汇表（那是两千行已验证代码的无谓风险）。
+- **参与编译**：`extension.zig` 里用 comptime 分支按目标引用对应的平台导入器。这一步
+  把"交叉编译能不能过"变成一条真能跑的检查，而不是靠人记得手动编。
+- **Linux 的 C 侧**：`vk_import_shim.c` 编进扩展（它不链 libvulkan，自己 `dlopen`
+  解析 loader，所以只需要 Vulkan 头），并链 `dl`；Vulkan 头目录可用
+  `-Dvulkan-include` 覆盖。另外搬入 `ffva_shim.h`——它是 VAAPI 解码 shim 的**纯 C ABI
+  头**（只 include `stddef`/`stdint`，不含 `va/va.h`），vk shim 需要它。
+
+### 还没做完的
+
+- **随包 Vulkan Layer 的产物接线**：`luna_ext_layer.c` 要单独编成 `.so`，连同
+  `luna_ext_layer.json` 装到扩展能找得到的位置（源工程用的是 `$ORIGIN/libs/linux64`
+  rpath），`vulkan_layer_setup.zig` 才找得到它。本步没有动它，因为它在 macOS 上既不能
+  编也不该装。
+- **接缝适配层**：`platform_surface.PlaneTextures/ImportResult` ↔ 本仓库 0014 的
+  `Surface/Error` 的那一层映射（约二十行，含四种失败的对应关系）。
+- **真机运行**：见下表。
+
 ## 验证状态（必须说清楚）
 
 | 事项 | 状态 |
 |---|---|
 | 源工程里的 Windows / Linux 实现 | **已在该工程的真机上验证过**（项目所有者确认） |
-| 搬进本仓库的这份代码 | **尚未**在本仓库编译或运行过 |
-| 计划中的可做验证 | 目标平台交叉编译通过（编译期证据，不是运行期证据） |
-| 运行期再验证 | 需要 Windows / Linux 真机；在那之前，推进表里这两项的状态只写到"移植 + 交叉编译"，**不会**标成已完成 |
+| 搬进本仓库的这份代码 | **已能为两个目标平台交叉编译通过**（编译期证据，见下） |
+| 运行期验证 | **仍未做**：需要 Windows / Linux 真机。在此之前推进表不会把这两项标成已完成 |
+
+交叉编译证据（本机 macOS 上执行）：
+
+```bash
+zig build -Dtarget=x86_64-windows-gnu   # → lunastream.dll（663 KB，含 D3D12 导入器与手写 COM/D3D 绑定）
+zig build -Dtarget=x86_64-linux-gnu     # → liblunastream.so（400 KB，含 vk_import_shim）
+```
+
+这条证据的边界也要写清楚：它证明**能编、能链**，不证明运行时正确——接口对不上、
+驱动行为差异、共享句柄细节都要真机才看得见。所以文档里不出现"已验证"这个词来描述
+这两步在本仓库的状态。
 
 这条差别必须留着：SKILL 的红线是"不写未验证的结论"。沿用源工程的验证结论是合理的
 （那是同一份算法与同一条路径），但不能因此说成"本仓库已验证"。

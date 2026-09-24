@@ -24,8 +24,8 @@
 | 0013 | CPU 帧导入器与轮换纹理池 | 呈现 | ✅ 已完成 |
 | 0014 | 导入器运行时分发（平台 / CPU 二选一） | 呈现 | ✅ 已完成 |
 | 0015 | Metal 呈现导入器（macOS 零拷贝） | 呈现 | ✅ 已完成 |
-| 0016 | D3D12 呈现导入器（Windows 零拷贝） | 呈现 | 代码已从源工程搬入，接缝适配与交叉编译待做（见 `docs/platform-port.md`） |
-| 0017 | Vulkan dma-buf 导入器与随包 Vulkan Layer（Linux 零拷贝） | 呈现 | 代码已从源工程搬入，接缝适配与交叉编译待做（见 `docs/platform-port.md`） |
+| 0016 | D3D12 呈现导入器（Windows 零拷贝） | 呈现 | 已搬入并交叉编译通过；适配层与真机运行待做（见 `docs/platform-port.md`） |
+| 0017 | Vulkan dma-buf 导入器与随包 Vulkan Layer（Linux 零拷贝） | 呈现 | 已搬入并交叉编译通过；Layer 产物接线与真机运行待做（见 `docs/platform-port.md`） |
 | 0018 | `VideoStream` / `VideoStreamPlayback` / 资源加载器 | Godot | 进行中（第 1 步：色彩层与呈现侧的仿射常数契约） |
 | 0019 | 信号与重连状态机（把 GDScript 里那 150 行搬进扩展） | Godot | 待做 |
 | 0020 | 纹理直给（`stream.texture`） | Godot | 待做 |
