@@ -29,6 +29,23 @@ macOS 那两步（0013 CPU 导入器、0015 Metal 导入器）**没有**放宽�
 | `src/vulkan_layer/vk_dispatch_table_helper.h` / `vk_layer_dispatch_table.h` | 同名 | Layer 需要的生成式分发表 |
 | `src/godot/surface_importer.reference.zig` | `surface_importer.zig` | **参考用**：源工程的导入接口形状（不参与编译） |
 | `src/godot/present_pipeline.reference.zig` | `present_pipeline.zig` | **参考用**：源工程的呈现管线（不参与编译） |
+| `src/godot/plane_copy.zig` | 同名 | 平面拷贝辅助（CPU 拷贝回退路径要用） |
+| `src/win/com.zig` | `src/mf/win/com.zig` | 手写的 COM/IUnknown/ComPtr/HRESULT 与 Win32 句柄辅助 |
+| `src/win/dxgi.zig` | `src/mf/win/dxgi.zig` | DXGI 资源接口与 DXGI_FORMAT 子集（共享句柄导出要用） |
+| `src/win/d3d11.zig` | `src/mf/win/d3d11.zig` | D3D11 设备/上下文/纹理/fence 与互操作用的描述符结构 |
+| `src/win/d3d12.zig` | `src/mf/win/d3d12.zig` | 零拷贝导入器打开共享句柄要用的三个 D3D12 接口 |
+| `src/win/d3dcompiler.zig` | `src/mf/win/d3dcompiler.zig` | 运行期 HLSL 编译（平面拆分 compute） |
+| `src/win/root.zig` | `src/mf/win.zig`（收敛） | 聚合根，**去掉了 `mf` 子模块**——本仓库不要 MF 解码后端 |
+
+### 两处刻意的不同
+
+1. **聚合根去掉 `mf`**：源工程的 `win.zig` 还导出 Media Foundation 绑定；本仓库按
+   PLAN §5.5 不要 MF 解码后端，而平台导入器只用得到 COM 与 D3D 部分，所以
+   `src/win/root.zig` 只导出五个子模块。
+2. **Windows 绑定是手写的、不 `@cImport`**（源工程写在 `win.zig` 里的硬规矩：每个
+   OS 类型、GUID、COM 接口都照 mingw-w64 头逐个誊写，vtable 按槽位顺序完整列出）。
+   本仓库 macOS 那一侧走的是另一条路——Objective-C 薄桥加 Zig 侧 `@cImport` 自己的头。
+   两条路都能走通，差别只在"ABI 风险由谁承担"，这里照搬源工程的选择。
 
 带 `.reference` 后缀的两份是刻意不改名的：它们既不是本仓库的接口（0014 已经定了自己的
 `surface_importer.SurfaceImporter`），也不是本仓库的实现，放在旁边只为对照——**它们
@@ -39,14 +56,27 @@ macOS 那两步（0013 CPU 导入器、0015 Metal 导入器）**没有**放宽�
 1. **接口对齐**。源工程的导入器实现的是它的 `si.ImportResult`；本仓库 0014 定的是
    `Surface { spec, planes, release_hook }` + `Error`。适配点是每个导入器的
    `import()` 返回处与 `deinit()`，不涉及内部算法。
+
+   搬的时候才发现它的词汇表**比 0014 的更有表达力**，有两处值得吸收：
+   - `ImportResult` 五种结果（`success / not_ready / bad_frame / transient_failure /
+     capability_unavailable`），其中只有 `capability_unavailable` 允许 Windows 的选择器
+     **永久放弃** D3D12——"暂时失败"与"能力不可用"必须分开，否则一次抖动就会把整条
+     会话降级；
+   - `raw_code_shift`（每帧 0 或 6）：VAAPI 的 P010 与 CoreVideo 的 x420 是**左对齐**，
+     要在着色器里右移 6 位还原；本仓库软解路径在 shim 里就统一成右对齐了，所以这条
+     只在平台路径上需要。
 2. **选择器合并**。源工程有 `importer_selector.zig`；本仓库 0014 已有
    `dispatching_surface_importer.zig`。把平台导入器挂进后者，不再引入第二个选择器。
-3. **构建接线**（源工程 `build.zig` 第 77/240–283/398–460 行是参照）：
+3. **模块接线**。源工程里平台导入器写的是 `@import("mf").win`，本仓库没有 `mf` 模块，
+   改成 `@import("win")`（build.zig 里声明一个只在 Windows 目标下存在的模块，
+   root 为 `src/win/root.zig`）；同时把它们对 `surface_importer.zig` 的引用指向本仓库
+   的词汇表（或按上面第 1 条吸收其表达力）。
+4. **构建接线**（源工程 `build.zig` 第 77/240–283/398–460 行是参照）：
    - Windows：编译上面的 Windows 源 + 链 `dxgi` / `d3d12` / `ole32` / `d3dcompiler_47`；
    - Linux：编译 `ffva` 的 vk shim，另出一个 `luna_ext_layer` 动态库 + `luna_ext_layer.json`，
      并给扩展加 `$ORIGIN/libs/linux64` 的 rpath；
    - 两者都要保证**其它平台不编译这些文件**。
-4. **交叉编译检查**（本机可做的部分）：
+5. **交叉编译检查**（本机可做的部分）：
    `zig build -Dtarget=x86_64-windows-gnu` 与 `-Dtarget=x86_64-linux-gnu`，至少在
    macOS 上把 Zig 侧与 C 侧编过一遍（Zig 自带 mingw-w64 头，Windows 侧可用；
    Linux 侧的 VAAPI/Vulkan 头是否齐备要实测）。
