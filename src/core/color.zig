@@ -96,6 +96,26 @@ pub const ColorRange = enum(u8) {
     full,
 };
 
+/// 色彩原色（未指定时按 BT.709 处理）。目前只作为标签随帧传递，
+/// 广色域换算与 HDR 一起做（见推进表的 HDR 条目）。
+pub const ColorPrimaries = enum(u8) {
+    unspecified = 0,
+    bt709 = 1,
+    bt601_625 = 2, // EBU 3213-E (PAL)
+    bt601_525 = 3, // SMPTE C (NTSC)
+    bt2020 = 4,
+};
+
+/// 传输函数（光电转换曲线的类型标签）。
+pub const TransferFunction = enum(u8) {
+    unspecified = 0,
+    bt709 = 1,
+    gamma22 = 2,
+    gamma28 = 3,
+    smpte2084 = 4, // PQ
+    hlg = 5,
+};
+
 /// 有效位深。
 ///
 /// 做成枚举而不是 `u8`：这样"12 位深"这种不支持的取值根本无法被表达，

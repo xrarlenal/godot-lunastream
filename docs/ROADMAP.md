@@ -15,8 +15,8 @@
 | 0004 | 帧回收环（呈现完成后再释放） | core | ✅ 已完成 |
 | 0005 | 呈现选择器（drop-late / hold-early） | core | ✅ 已完成 |
 | 0006 | 色彩层（色域矩阵 / 码值范围 / 位深对齐） | core | ✅ 已完成 |
-| 0007 | 线程原语与有界 worker 池（Zig 0.16 `std.Io` 适配） | core | 进行中 |
-| 0008 | 播放控制器与状态机（IDLE/OPENING/PLAYING/STALLED/FAILED） | core | 待做 |
+| 0007 | 线程原语、后端接口与有界 worker 池 | core | ✅ 已完成 |
+| 0008 | 播放控制器与状态机（IDLE/OPENING/PLAYING/STALLED/FAILED） | core | 进行中 |
 | 0009 | 后端选择器与硬解名额预算（auto/hardware/software） | core | 待做 |
 | 0010 | FFmpeg 解封装与软解后端（`ffsw`） | 解码 | 待做 |
 | 0011 | 10-bit 软解路径（`yuv420p10le` / `P010` 右对齐） | 解码 | 待做 |

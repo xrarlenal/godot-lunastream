@@ -15,6 +15,9 @@ pub const closure = @import("closure.zig");
 pub const retire_ring = @import("retire_ring.zig");
 pub const present_selector = @import("present_selector.zig");
 pub const color = @import("color.zig");
+pub const sys_clock = @import("sys_clock.zig");
+pub const backend = @import("backend.zig");
+pub const decode_scheduler = @import("decode_scheduler.zig");
 
 test "core 模块可以编译并被引用" {
     try std.testing.expect(version.len > 0);
@@ -22,4 +25,5 @@ test "core 模块可以编译并被引用" {
 
 test {
     std.testing.refAllDecls(@This());
+    _ = @import("decode_scheduler_test.zig");
 }
