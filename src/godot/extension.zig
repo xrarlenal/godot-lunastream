@@ -24,6 +24,9 @@ comptime {
     } else if (builtin.os.tag == .linux) {
         _ = @import("vulkan_surface_importer.zig");
         _ = @import("platform_importer_adapter.zig");
+    } else if (builtin.os.tag == .macos) {
+        // 解码后端 ffsw（C shim + core 后端适配器）：引擎里真正解码走的就是它。
+        _ = @import("ffsw");
     }
 }
 

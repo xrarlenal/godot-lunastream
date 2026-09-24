@@ -57,6 +57,7 @@ pub fn build(b: *Build) !void {
         .optimize = optimize,
     });
 
+
     // --- 着色器推送常量的 ABI 守卫（0018） ---
     // 同样只 @embedFile 读文本再与 core 的结构体比对，不需要 GPU / Godot。
     const shader_abi_mod = b.createModule(.{
@@ -246,6 +247,67 @@ pub fn build(b: *Build) !void {
             .{ .name = "shaders", .module = shaders_mod },
         },
     });
+
+    // --- 解码后端 ffsw：C shim 编进扩展 + 链 FFmpeg（0018 的接线前置） ---
+    //
+    // 这一层以前只在离线自检与烟测里被链过，扩展本身没有它，所以引擎里根本解不了码。
+    // 只在 macOS 目标上接：这条 dev 路径用的是 Homebrew 的 FFmpeg，随包分发（含 LGPL
+    // 重编）是 0021 的事；Windows / Linux 的交叉编译不该被本机的 FFmpeg 布局绑住。
+    if (target.result.os.tag == .macos) {
+        const ffsw_mod = b.createModule(.{
+            .root_source_file = b.path("src/ffsw/ffsw_backend.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{.{ .name = "core", .module = core_mod }},
+        });
+        ffsw_mod.addIncludePath(b.path("src/ffsw"));
+        ext_mod.addImport("ffsw", ffsw_mod);
+
+        ext_mod.addIncludePath(b.path("src/ffsw"));
+        ext_mod.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "include" }) });
+        ext_mod.addCSourceFile(.{
+            .file = b.path("src/ffsw/ffsw_shim.c"),
+            .flags = &.{"-std=c11"},
+        });
+        ext_mod.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "lib" }) });
+        for ([_][]const u8{ "avformat", "avcodec", "avutil", "swscale" }) |lib| {
+            ext_mod.linkSystemLibrary(lib, .{});
+        }
+
+        // 适配器的离线烟测：不需要 Godot，直接通过 core 的后端接口解一段流。
+        const backend_smoke_step = b.step("ffsw-backend-smoke", "解码后端适配器的离线烟测（不需要 Godot）");
+        const backend_smoke_mod = b.createModule(.{
+            .root_source_file = b.path("src/ffsw/backend_smoke.zig"),
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+            .imports = &.{
+                .{ .name = "core", .module = core_mod },
+                .{ .name = "ffsw", .module = ffsw_mod },
+            },
+        });
+        backend_smoke_mod.addIncludePath(b.path("src/ffsw"));
+        const backend_smoke_exe = b.addExecutable(.{
+            .name = "backend_smoke",
+            .root_module = backend_smoke_mod,
+        });
+        backend_smoke_exe.root_module.addCSourceFile(.{
+            .file = b.path("src/ffsw/ffsw_shim.c"),
+            .flags = &.{"-std=c11"},
+        });
+        backend_smoke_exe.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "include" }) });
+        backend_smoke_exe.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "lib" }) });
+        for ([_][]const u8{ "avformat", "avcodec", "avutil", "swscale" }) |lib| {
+            backend_smoke_exe.root_module.linkSystemLibrary(lib, .{});
+        }
+        const backend_smoke_run = b.addRunArtifact(backend_smoke_exe);
+        backend_smoke_run.stdio = .inherit;
+        // 复用 ffsw-selftest 生成的片源，避免再拉一条 ffmpeg 调用出来。
+        backend_smoke_run.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "ffsw-selftest", "clip8.mp4" }));
+        backend_smoke_run.step.dependOn(&gen8.step);
+        backend_smoke_step.dependOn(&backend_smoke_run.step);
+    }
 
     // 平台导入器需要的原生桥。头文件在所有平台都可见（自检要引用它的类型），
     // 但只有 macOS 才编译 Objective-C 实现并链框架——Windows / Linux 各有自己的
