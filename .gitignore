@@ -35,3 +35,6 @@ dist/
 
 # 播放烟测拷进示例工程的片源（构建产物）
 example/gdextension-smoke/clip*.mp4
+
+# glslangValidator 复核着色器时的副产物
+*.spv
