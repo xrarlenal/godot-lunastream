@@ -1,0 +1,18 @@
+//! core 模块根：与 Godot 无关的纯逻辑。
+//!
+//! 这一层不引用任何 Godot 或平台 SDK 类型，因此它的单元测试不需要引擎、
+//! 不需要 GPU、也不需要在目标平台上跑——`zig build test` 在任何机器上都能验证。
+//! 解码后端与呈现导入器都以这一层为契约。
+
+const std = @import("std");
+
+/// 语义化版本，与仓库 tag 同步。
+pub const version = "0.0.0";
+
+test "core 模块可以编译并被引用" {
+    try std.testing.expect(version.len > 0);
+}
+
+test {
+    std.testing.refAllDecls(@This());
+}

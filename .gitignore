@@ -1,0 +1,24 @@
+# Zig
+.zig-cache/
+zig-out/
+
+# Godot
+.godot/
+*.uid
+
+# 构建产物
+*.o
+*.obj
+*.a
+*.so
+*.dylib
+*.dll
+*.pdb
+
+# macOS
+.DS_Store
+
+# 编辑器
+.vscode/
+.idea/
+.zed/
