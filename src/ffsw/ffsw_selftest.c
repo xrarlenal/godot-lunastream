@@ -33,8 +33,8 @@ static void check(int ok, const char *what) {
 	}
 }
 
-// 一帧的亮度均值：确认"确实解出了画面"而不是一屏黑（全零平面只有在纯黑
-// 测试图上才是对的，那会让"解码没跑"看起来像通过）。
+// 一帧的亮度均值（按字节算，8/10 位通用）：确认"确实解出了画面"而不是一屏黑
+// （全零平面只有在纯黑测试图上才是对的，那会让"解码没跑"看起来像通过）。
 static double mean_luma(const nv_ffsw_video_frame *f) {
 	if (f->y == NULL || f->width <= 0 || f->height <= 0) return 0.0;
 	double sum = 0.0;
@@ -45,15 +45,61 @@ static double mean_luma(const nv_ffsw_video_frame *f) {
 	return sum / ((double)f->width * (double)f->height);
 }
 
-// 把一帧紧排写进 fp（整块 Y，然后整块 UV）。布局与 rawvideo/nv12 一致。
-static int dump_frame(FILE *fp, const nv_ffsw_video_frame *f) {
+// 亮度平面的最大码值。10-bit 用它确认"右对齐"：右对齐时上界是 1023，
+// 若被误当成 P010 的左对齐就会看到 65 472 这个量级。
+static unsigned max_luma_sample(const nv_ffsw_video_frame *f) {
+	unsigned max_sample = 0;
+	const int bytes_per_sample = f->bit_depth > 8 ? 2 : 1;
 	for (int row = 0; row < f->height; row++) {
 		const unsigned char *p = f->y + (size_t)row * (size_t)f->y_stride;
-		if (fwrite(p, 1, (size_t)f->width, fp) != (size_t)f->width) return -1;
+		for (int col = 0; col < f->width; col++) {
+			unsigned v;
+			if (bytes_per_sample == 2) {
+				// 小端：低字节在前（三个目标平台都是小端）。
+				v = (unsigned)p[col * 2] | ((unsigned)p[col * 2 + 1] << 8);
+			} else {
+				v = p[col];
+			}
+			if (v > max_sample) max_sample = v;
+		}
 	}
-	for (int row = 0; row < (f->height + 1) / 2; row++) {
-		const unsigned char *p = f->uv + (size_t)row * (size_t)f->uv_stride;
-		if (fwrite(p, 1, (size_t)f->uv_stride, fp) != (size_t)f->uv_stride) return -1;
+	return max_sample;
+}
+
+// 把一帧紧排写进 fp。转储格式刻意与 ffmpeg 的对照输出对齐：
+//
+//   8-bit  → 整块 Y + 整块交织 UV，与 `-pix_fmt nv12` 一致；
+//   10-bit → 整块 Y + Cb 平面 + Cr 平面，与 `-pix_fmt yuv420p10le` 一致
+//            （ffmpeg 没有右对齐的 4:2:0 半平面格式，所以这一侧只能按平面比）。
+//
+// 10-bit 这一路会多做一次无损拆交织。那是转储格式的选择，不改变帧本身的布局
+// ——帧始终是"亮度平面 + 交织 CbCr 平面"，由结构检查（stride/平面尺寸）守着。
+static int dump_frame(FILE *fp, const nv_ffsw_video_frame *f) {
+	const int bytes_per_sample = f->bit_depth > 8 ? 2 : 1;
+	const size_t y_row_bytes = (size_t)f->width * (size_t)bytes_per_sample;
+	for (int row = 0; row < f->height; row++) {
+		const unsigned char *p = f->y + (size_t)row * (size_t)f->y_stride;
+		if (fwrite(p, 1, y_row_bytes, fp) != y_row_bytes) return -1;
+	}
+
+	if (bytes_per_sample == 1) {
+		for (int row = 0; row < (f->height + 1) / 2; row++) {
+			const unsigned char *p = f->uv + (size_t)row * (size_t)f->uv_stride;
+			if (fwrite(p, 1, (size_t)f->uv_stride, fp) != (size_t)f->uv_stride) return -1;
+		}
+		return 0;
+	}
+
+	const int chroma_cols = (f->width + 1) / 2;
+	for (int plane = 0; plane < 2; plane++) {
+		for (int row = 0; row < (f->height + 1) / 2; row++) {
+			const uint16_t *src = (const uint16_t *)(const void *)(f->uv + (size_t)row * (size_t)f->uv_stride);
+			for (int col = 0; col < chroma_cols; col++) {
+				const uint16_t v = src[col * 2 + plane];
+				const unsigned char bytes[2] = {(unsigned char)(v & 0xFF), (unsigned char)(v >> 8)};
+				if (fwrite(bytes, 1, 2, fp) != 2) return -1;
+			}
+		}
 	}
 	return 0;
 }
@@ -137,10 +183,16 @@ static void phase_content(const char *path, const char *dump_path, int max_frame
 		if (frames == 0) {
 			first_pts = f.pts_seconds;
 			first_mean = mean_luma(&f);
+			const int bytes_per_sample = f.bit_depth > 8 ? 2 : 1;
+			const unsigned max_sample = max_luma_sample(&f);
+			printf("         首帧 %dx%d bit_depth=%d y_stride=%d uv_stride=%d 最大码值=%u\n", f.width,
+			       f.height, f.bit_depth, f.y_stride, f.uv_stride, max_sample);
 			check(f.y != NULL && f.uv != NULL, "两个平面都有指针");
-			check(f.bit_depth == 8, "首帧位深是 8-bit");
-			check(f.y_stride == f.width, "亮度 stride 等于宽度（紧凑、无行填充）");
-			check(f.uv_stride == f.width, "色度 stride 等于宽度（NV12 交织平面）");
+			check(f.bit_depth == 8 || f.bit_depth == 10, "首帧位深是 8 或 10");
+			check(f.y_stride == f.width * bytes_per_sample, "亮度 stride == 宽度 x 每样值字节数（紧凑）");
+			check(f.uv_stride == f.width * bytes_per_sample, "色度 stride 同上（交织 CbCr 平面）");
+			check(max_sample <= (unsigned)(bytes_per_sample == 2 ? 1023 : 255),
+			      "亮度最大码值在有效位深内（10-bit 右对齐而非 P010 左对齐）");
 			check(f.width == info.width && f.height == info.height, "首帧尺寸与 open 报告一致");
 			check(f.color.matrix == info.color.matrix, "逐帧色域沿用容器的矩阵标签");
 		}

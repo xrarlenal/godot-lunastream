@@ -110,6 +110,10 @@ typedef struct {
 // 一直有效。两个平面**紧凑打包无行填充**，所以 8-bit 时 stride == width、
 // 10-bit 时 stride == width * 2；仍然逐帧上报 stride，是为了让布局日后可以
 // 换成带填充的版本而不用改调用方。
+//
+// 10-bit 一律是**右对齐**：10 位有效码值放在 16 位容器的低位（实测 ffmpeg 的
+// `nv20le` 就是这个约定，最大样值 1023）。它和 P010 的左对齐（`1023 << 6`）
+// 是两种约定，core 的 color.zig 两种都能还原，但本 shim 只发右对齐这一种。
 typedef struct {
 	const unsigned char *y;   // 亮度平面
 	const unsigned char *uv;  // 交织 CbCr 平面

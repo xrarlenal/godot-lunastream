@@ -76,42 +76,82 @@ pub fn build(b: *Build) !void {
     }
 
     const ffsw_work = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "ffsw-selftest" });
-    const ffsw_clip = b.pathJoin(&.{ ffsw_work, "clip.mp4" });
-    const ffsw_dump = b.pathJoin(&.{ ffsw_work, "shim_nv12.raw" });
-    const ffsw_ref = b.pathJoin(&.{ ffsw_work, "ffmpeg_nv12.raw" });
-
     const ffsw_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", ffsw_work });
-    const ffsw_gen = b.addSystemCommand(&.{
+
+    // 场景一：8-bit 4:2:0（mpeg4 是内置编码器，不依赖外部库）。对照格式 nv12。
+    const clip8 = b.pathJoin(&.{ ffsw_work, "clip8.mp4" });
+    const dump8 = b.pathJoin(&.{ ffsw_work, "shim_nv12.raw" });
+    const ref8 = b.pathJoin(&.{ ffsw_work, "ffmpeg_nv12.raw" });
+
+    const gen8 = b.addSystemCommand(&.{
         "ffmpeg", "-y", "-v", "error",
         "-f",    "lavfi",
         "-i",    "testsrc=size=320x240:rate=25:duration=2",
         "-c:v",  "mpeg4",
         "-q:v",  "3",
-        ffsw_clip,
+        clip8,
     });
-    ffsw_gen.step.dependOn(&ffsw_mkdir.step);
+    gen8.step.dependOn(&ffsw_mkdir.step);
 
-    const ffsw_run = b.addRunArtifact(ffsw_exe);
-    ffsw_run.stdio = .inherit;
-    ffsw_run.addArg(ffsw_clip);
-    ffsw_run.addArg("--dump");
-    ffsw_run.addArg(ffsw_dump);
-    ffsw_run.step.dependOn(&ffsw_gen.step);
+    const run8 = b.addRunArtifact(ffsw_exe);
+    run8.stdio = .inherit;
+    run8.addArg(clip8);
+    run8.addArg("--dump");
+    run8.addArg(dump8);
+    run8.step.dependOn(&gen8.step);
 
     // 对照：同样的片源、同样的目标格式，交给 ffmpeg 自己解一遍。
-    const ffsw_reference = b.addSystemCommand(&.{
+    const ref_cmd8 = b.addSystemCommand(&.{
         "ffmpeg", "-y", "-v", "error",
-        "-i",     ffsw_clip,
+        "-i",     clip8,
         "-pix_fmt", "nv12",
         "-fps_mode", "passthrough",
         "-f",         "rawvideo",
-        ffsw_ref,
+        ref8,
     });
-    ffsw_reference.step.dependOn(&ffsw_run.step);
+    ref_cmd8.step.dependOn(&run8.step);
 
-    const ffsw_cmp = b.addSystemCommand(&.{ "cmp", ffsw_dump, ffsw_ref });
-    ffsw_cmp.step.dependOn(&ffsw_reference.step);
-    ffsw_step.dependOn(&ffsw_cmp.step);
+    const cmp8 = b.addSystemCommand(&.{ "cmp", dump8, ref8 });
+    cmp8.step.dependOn(&ref_cmd8.step);
+    ffsw_step.dependOn(&cmp8.step);
+
+    // 场景二：10-bit 4:2:0。ffv1 也是内置编解码器（不依赖 libx264 的 10-bit 构建），
+    // 对照格式是平面 10-bit——ffmpeg 没有"右对齐的 4:2:0 半平面"格式，所以这一侧
+    // 只能按平面比（自检的转储会做一次无损拆交织，见 ffsw_selftest.c 的注释）。
+    const clip10 = b.pathJoin(&.{ ffsw_work, "clip10.mkv" });
+    const dump10 = b.pathJoin(&.{ ffsw_work, "shim_yuv420p10le.raw" });
+    const ref10 = b.pathJoin(&.{ ffsw_work, "ffmpeg_yuv420p10le.raw" });
+
+    const gen10 = b.addSystemCommand(&.{
+        "ffmpeg", "-y", "-v", "error",
+        "-f",       "lavfi",
+        "-i",       "testsrc=size=320x240:rate=25:duration=2",
+        "-pix_fmt", "yuv420p10le",
+        "-c:v",     "ffv1",
+        clip10,
+    });
+    gen10.step.dependOn(&ffsw_mkdir.step);
+
+    const run10 = b.addRunArtifact(ffsw_exe);
+    run10.stdio = .inherit;
+    run10.addArg(clip10);
+    run10.addArg("--dump");
+    run10.addArg(dump10);
+    run10.step.dependOn(&gen10.step);
+
+    const ref_cmd10 = b.addSystemCommand(&.{
+        "ffmpeg", "-y", "-v", "error",
+        "-i",       clip10,
+        "-pix_fmt", "yuv420p10le",
+        "-fps_mode", "passthrough",
+        "-f",         "rawvideo",
+        ref10,
+    });
+    ref_cmd10.step.dependOn(&run10.step);
+
+    const cmp10 = b.addSystemCommand(&.{ "cmp", dump10, ref10 });
+    cmp10.step.dependOn(&ref_cmd10.step);
+    ffsw_step.dependOn(&cmp10.step);
 
     // --- GDExtension：gdzig 绑定 + 扩展入口 ---
     const gdzig_dep = if (opt_godot_path) |godot_path| b.dependency("gdzig", .{

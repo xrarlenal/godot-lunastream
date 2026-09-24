@@ -46,6 +46,7 @@ struct nv_ffsw_backend {
 	AVFrame *frame;
 	struct SwsContext *sws;
 	enum AVPixelFormat sws_src_fmt;
+	enum AVPixelFormat sws_dst_fmt;
 	int sws_src_w;
 	int sws_src_h;
 
@@ -195,13 +196,17 @@ static void slot_release(nv_ffsw_slot *slot) {
 	slot->in_use = 0;
 }
 
-// 让槽位装得下 w x h 的 NV12。跨帧复用，尺寸不变时不分配——稳定态下
+// 让槽位装得下 w x h 的半平面 4:2:0。跨帧复用，尺寸不变时不分配——稳定态下
 // 取帧与归还都不碰堆。
-static int slot_reserve(nv_ffsw_slot *slot, int w, int h) {
-	const size_t y_size = (size_t)w * (size_t)h;
-	// 交织 CbCr 平面：半分辨率、每像素对 2 字节，所以一行 ((w+1)/2)*2 字节
-	// ——偶数宽度下正好等于 w（与头文件里"stride == width"的承诺一致）。
-	const int uv_row = ((w + 1) / 2) * 2;
+//
+// bytes_per_sample 把 8-bit（NV12）与 10-bit（每个样值 16 位容器）统一到同一套
+// 算术里：两者的平面布局完全一样，只差每个样值的字节数。
+static int slot_reserve(nv_ffsw_slot *slot, int w, int h, int bytes_per_sample) {
+	const size_t y_size = (size_t)w * (size_t)h * (size_t)bytes_per_sample;
+	// 交织 CbCr 平面：半分辨率、每像素对 2 个样值，所以一行
+	// ((w+1)/2) * 2 * 字节数 ——偶数宽度下正好是 w * 字节数
+	//（与头文件里"8-bit 时 stride == width、10-bit 时 == width * 2"一致）。
+	const int uv_row = ((w + 1) / 2) * 2 * bytes_per_sample;
 	const size_t uv_size = (size_t)uv_row * (size_t)((h + 1) / 2);
 
 	if (slot->y_cap < y_size) {
@@ -220,6 +225,30 @@ static int slot_reserve(nv_ffsw_slot *slot, int w, int h) {
 	slot->height = h;
 	slot->uv_row = uv_row;
 	return 0;
+}
+
+// 把 MSB 对齐的 16 位样值原地改成右对齐（每个样值右移 6 位）。
+//
+// 为什么需要它：本项目对 10-bit 的约定是**右对齐**（10 位有效码值放在 16 位容器
+// 的低位），而 ffmpeg 里 4:2:0 的半平面 16 位容器只有 P010——它是 MSB 对齐的
+// （`1023 << 6`）。另一个候选 NV20 虽然右对齐，但它是 **4:2:2**（色度只做水平
+// 下采样），与 4:2:0 的平面布局不同，不能拿来用。
+//
+// 代价是这一步唯一的额外内存遍历：1.5 * w * h 个样值。换来的是帧布局只有一种
+// 约定，消费者不必再问"这帧是 P010 还是右对齐"。
+static void right_align_in_place(nv_ffsw_slot *slot, int w, int h) {
+	const size_t y_samples = (size_t)w * (size_t)h;
+	uint16_t *y = (uint16_t *)slot->y;
+	for (size_t i = 0; i < y_samples; i++) {
+		y[i] = (uint16_t)(y[i] >> 6);
+	}
+
+	// 两个平面都是紧凑的，所以整个平面可以当成一个数组走。
+	const size_t uv_samples = (size_t)(slot->uv_row / 2) * (size_t)((h + 1) / 2);
+	uint16_t *uv = (uint16_t *)slot->uv;
+	for (size_t i = 0; i < uv_samples; i++) {
+		uv[i] = (uint16_t)(uv[i] >> 6);
+	}
 }
 
 // --- 解码器 ---------------------------------------------------------------
@@ -315,16 +344,20 @@ static int feed_decoder(nv_ffsw_backend *handle) {
 // 用 SWS_BICUBIC 是刻意的：它就是 ffmpeg 命令行在不给 `-sws_flags` 时的默认值，
 // 所以"与 ffmpeg 自己的解码逐字节对照"这条验证对 4:4:4 / 4:2:2 源也能成立
 // （4:2:0 源根本不发生色度重采样，这个标志不影响结果）。
-static int ensure_sws(nv_ffsw_backend *handle, enum AVPixelFormat src_fmt, int w, int h) {
-	const int same = handle->sws != NULL && handle->sws_src_fmt == src_fmt;
+//
+// dst_fmt 必须进缓存键：8-bit 与 10-bit 是两种输出格式，同一个上下文换不了。
+static int ensure_sws(nv_ffsw_backend *handle, enum AVPixelFormat src_fmt, enum AVPixelFormat dst_fmt,
+                      int w, int h) {
+	const int same = handle->sws != NULL && handle->sws_src_fmt == src_fmt && handle->sws_dst_fmt == dst_fmt;
 	if (same && handle->sws_src_w == w && handle->sws_src_h == h) return 0;
 	if (handle->sws != NULL) {
 		sws_freeContext(handle->sws);
 		handle->sws = NULL;
 	}
-	handle->sws = sws_getContext(w, h, src_fmt, w, h, AV_PIX_FMT_NV12, SWS_BICUBIC, NULL, NULL, NULL);
+	handle->sws = sws_getContext(w, h, src_fmt, w, h, dst_fmt, SWS_BICUBIC, NULL, NULL, NULL);
 	if (handle->sws == NULL) return -1;
 	handle->sws_src_fmt = src_fmt;
+	handle->sws_dst_fmt = dst_fmt;
 	handle->sws_src_w = w;
 	handle->sws_src_h = h;
 	return 0;
@@ -337,12 +370,19 @@ static int ensure_sws(nv_ffsw_backend *handle, enum AVPixelFormat src_fmt, int w
 static nv_ffsw_result pack_frame(nv_ffsw_backend *handle, nv_ffsw_slot *slot, nv_ffsw_video_frame *out) {
 	AVFrame *f = handle->frame;
 
-	if (bit_depth_of((enum AVPixelFormat)f->format) != 8) {
-		// 10-bit 通路是 0011 的内容。这里明确失败，绝不悄悄降到 8-bit 输出
-		// ——那会让 10-bit 片源静默丢掉低两位。
-		set_error(handle, "10-bit software decode not implemented yet (see 0011)");
+	const int depth = bit_depth_of((enum AVPixelFormat)f->format);
+	if (depth != 8 && depth != 10) {
+		// 12-bit（yuv420p12le / P012）不在承诺范围内：宁可明确失败，也不悄悄
+		// 截成 10 位——那是把动态范围砍掉一段而使用者看不出来。
+		set_error(handle, "only 8-bit and 10-bit software decode are supported");
 		return NV_FFSW_FAIL;
 	}
+	const int bytes_per_sample = depth > 8 ? 2 : 1;
+	// 10-bit 先让 swscale 出 P010（4:2:0 半平面、16 位容器、MSB 对齐），
+	// 再原地右移 6 位变成本项目约定的右对齐。布局与 NV12 完全同构，只是每个
+	// 样值占 2 字节。
+	// （三个目标平台都是小端，所以固定 LE；将来要上大端才需要在这里分叉。）
+	const enum AVPixelFormat dst_fmt = depth > 8 ? AV_PIX_FMT_P010LE : AV_PIX_FMT_NV12;
 
 	const int w = f->width;
 	const int h = f->height;
@@ -350,22 +390,24 @@ static nv_ffsw_result pack_frame(nv_ffsw_backend *handle, nv_ffsw_slot *slot, nv
 		set_error(handle, "decoded frame has no size");
 		return NV_FFSW_FAIL;
 	}
-	if (slot_reserve(slot, w, h) != 0) {
+	if (slot_reserve(slot, w, h, bytes_per_sample) != 0) {
 		set_error(handle, "out of memory for NV12 slot");
 		return NV_FFSW_FAIL;
 	}
-	if (ensure_sws(handle, (enum AVPixelFormat)f->format, w, h) != 0) {
+	if (ensure_sws(handle, (enum AVPixelFormat)f->format, dst_fmt, w, h) != 0) {
 		set_error(handle, "sws_getContext failed");
 		return NV_FFSW_FAIL;
 	}
 
 	uint8_t *dst[4] = { slot->y, slot->uv, NULL, NULL };
-	const int dst_stride[4] = { w, slot->uv_row, 0, 0 };
+	const int y_row = w * bytes_per_sample;
+	const int dst_stride[4] = { y_row, slot->uv_row, 0, 0 };
 	const int scaled = sws_scale(handle->sws, (const uint8_t *const *)f->data, f->linesize, 0, h, dst, dst_stride);
 	if (scaled <= 0) {
 		set_error(handle, "sws_scale failed");
 		return NV_FFSW_FAIL;
 	}
+	if (depth > 8) right_align_in_place(slot, w, h);
 
 	// 容器上的尺寸可能与解码后的显示尺寸不同（宏块对齐 / 裁剪）。以帧为准，
 	// 让之后的 video_width/height 与真实输出一致。
@@ -380,7 +422,7 @@ static nv_ffsw_result pack_frame(nv_ffsw_backend *handle, nv_ffsw_slot *slot, nv
 	if (f->color_primaries != AVCOL_PRI_UNSPECIFIED) c.primaries = map_primaries(f->color_primaries);
 	if (f->color_trc != AVCOL_TRC_UNSPECIFIED) c.transfer = map_transfer(f->color_trc);
 	if (f->color_range != AVCOL_RANGE_UNSPECIFIED) c.range = map_range(f->color_range);
-	c.bit_depth = 8;
+	c.bit_depth = depth;
 
 	int64_t ts = f->best_effort_timestamp;
 	if (ts == AV_NOPTS_VALUE) ts = f->pts;
@@ -397,11 +439,11 @@ static nv_ffsw_result pack_frame(nv_ffsw_backend *handle, nv_ffsw_slot *slot, nv
 
 	out->y = slot->y;
 	out->uv = slot->uv;
-	out->y_stride = w;
+	out->y_stride = y_row;
 	out->uv_stride = slot->uv_row;
 	out->width = w;
 	out->height = h;
-	out->bit_depth = 8;
+	out->bit_depth = depth;
 	out->pts_seconds = pts;
 	out->color = c;
 	out->owner = slot;
@@ -431,6 +473,7 @@ void nv_ffsw_close(nv_ffsw_backend *handle) {
 		handle->sws = NULL;
 	}
 	handle->sws_src_fmt = AV_PIX_FMT_NONE;
+	handle->sws_dst_fmt = AV_PIX_FMT_NONE;
 	handle->sws_src_w = 0;
 	handle->sws_src_h = 0;
 	if (handle->frame != NULL) av_frame_free(&handle->frame);
