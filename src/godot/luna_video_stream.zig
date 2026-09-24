@@ -16,9 +16,11 @@ const Allocator = std.mem.Allocator;
 const godot = @import("godot");
 const Registry = godot.extension.Registry;
 const Object = godot.class.Object;
+const RefCounted = godot.class.RefCounted;
 const VideoStream = godot.class.VideoStream;
 const VideoStreamPlayback = godot.class.VideoStreamPlayback;
 const String = godot.builtin.String;
+const StringName = godot.builtin.StringName;
 
 const core = @import("core");
 
@@ -45,6 +47,7 @@ decoder_choice: i64 = 0,
 pub fn register(r: *Registry) void {
     const class = r.createClass(LunaVideoStream, r.allocator, .auto);
     class.addMethod("ping", .auto);
+    class.addMethod("release_creator_ref", .auto);
     class.addProperty("decoder", .{
         .hint = .property_hint_enum,
         .hint_string = String.fromLatin1("auto,hardware,software"),
@@ -83,6 +86,28 @@ pub fn recreate(allocator: *Allocator, obj: *Object) *LunaVideoStream {
 pub fn destroy(self: *LunaVideoStream, allocator: *Allocator) void {
     self.base.destroy();
     allocator.destroy(self);
+}
+
+/// 交还创建期持有的那份引用（修 0022：实例泄漏）。
+///
+/// gdzig 的约定是"创建方持有一份引用"（见 `variant.zig` 的注释），但走 Godot 的
+/// `ClassDB.instantiate` 创建扩展类时，引擎自己还会加一份，引用计数停在 2 ——
+/// 脚本那份释放后还剩 1，对象永不销毁。
+///
+/// **时序是这件事的关键**：引擎的引用要等 `ClassDB.instantiate` 返回之后才加上，
+/// 而 `POSTINITIALIZE` 早于它（在创建回调链内部直接 unreference 会让计数归零、
+/// 对象被销毁，表现为 Godot 挂死——这是实测过的，见功能文档）。
+/// 所以这里只安排一次延迟调用，真正交还发生在引擎引用就位之后。
+pub fn _notification(self: *LunaVideoStream, what: i32, reversed: bool) void {
+    _ = reversed;
+    if (what == Object.NOTIFICATION_POSTINITIALIZE) {
+        _ = self.base.callDeferred(StringName.fromLatin1("release_creator_ref", false), .{});
+    }
+}
+
+/// 由上面的 deferred 调用触发：此时引擎已持有自己的引用，可以安全交还创建方那份。
+pub fn releaseCreatorRef(self: *LunaVideoStream) void {
+    _ = RefCounted.upcast(self.base).unreference();
 }
 
 /// 自检用：返回插件标识与版本，用来证明"扩展已加载、类可实例化、方法绑定可用"。

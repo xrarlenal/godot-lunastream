@@ -46,4 +46,7 @@ func _finish() -> void:
 		print("[smoke] RESULT=PASS")
 	else:
 		printerr("[smoke] RESULT=FAIL failures=", _failures)
+	# 让 deferred 的引用交还有机会执行（见 0022）：否则脚本在同一帧里
+	# 创建又退出，插件那一次的延迟释放来不及跑，退出时报实例泄漏。
+	await get_tree().process_frame
 	get_tree().quit(0 if _failures == 0 else 1)
