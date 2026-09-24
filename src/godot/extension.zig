@@ -20,8 +20,10 @@ comptime {
     // 里引用是为了让"交叉编译能不能过"成为一条真实可跑的检查，而不是靠人记得手动编。
     if (builtin.os.tag == .windows) {
         _ = @import("windows_surface_importer.zig");
+        _ = @import("platform_importer_adapter.zig");
     } else if (builtin.os.tag == .linux) {
         _ = @import("vulkan_surface_importer.zig");
+        _ = @import("platform_importer_adapter.zig");
     }
 }
 

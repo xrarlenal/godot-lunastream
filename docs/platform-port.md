@@ -99,6 +99,23 @@ macOS 那两步（0013 CPU 导入器、0015 Metal 导入器）**没有**放宽�
 
 - **真机运行**：见下表。
 
+### 已经做完的（接缝适配层）
+
+`src/godot/platform_importer_adapter.zig`：Windows / Linux 的导入器说的是源工程的词汇表
+（`platform_surface.zig` 的 `ImportResult` / `PlaneTextures`），呈现管线要的是本仓库
+0014 的 `Surface` / `Error`——**只有这一个文件知道两套词汇表**，把两千行已验证代码原样
+留着，比改写成另一套词汇表风险小得多。
+
+映射里最要紧的是失败分类原样保留：
+
+| 源工程的结果 | 本仓库的错误 |
+|---|---|
+| `success` | `Surface`（含 `raw_code_shift`，平台路径可能是左对齐的 16 位容器） |
+| `not_ready` | `Error.NotReady` |
+| `bad_frame` | `Error.BadFrame` |
+| `transient_failure` | `Error.TransientFailure`（**不要**据此降级整条会话） |
+| `capability_unavailable` | `Error.CapabilityUnavailable`（只有它允许永久放弃零拷贝路径） |
+
 ### 已经做完的（层产物接线）
 
 `luna_ext_layer.c` 单独编成 `libluna_ext_layer.so`，与 `luna_ext_layer.json` 一起装到
