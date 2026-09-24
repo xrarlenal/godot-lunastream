@@ -17,8 +17,8 @@
 | 0006 | 色彩层（色域矩阵 / 码值范围 / 位深对齐） | core | ✅ 已完成 |
 | 0007 | 线程原语、后端接口与有界 worker 池 | core | ✅ 已完成 |
 | 0008 | 播放状态机与重连退避（IDLE/OPENING/PLAYING/STALLED/FAILED/OFF） | core | ✅ 已完成 |
-| 0009 | 后端选择器与硬解名额预算（auto/hardware/software） | core | 进行中 |
-| 0010 | FFmpeg 解封装与软解后端（`ffsw`） | 解码 | 待做 |
+| 0009 | 解码器选择与硬解名额预算（auto/hardware/software） | core | ✅ 已完成 |
+| 0010 | FFmpeg 解封装与软解后端（`ffsw`） | 解码 | 进行中 |
 | 0011 | 10-bit 软解路径（`yuv420p10le` / `P010` 右对齐） | 解码 | 待做 |
 | 0012 | 解码烟测工具（`zig build decode-smoke`，不需要 Godot） | 解码 | 待做 |
 | 0013 | CPU 帧导入器与轮换纹理池 | 呈现 | 待做 |
