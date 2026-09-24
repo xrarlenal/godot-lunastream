@@ -31,15 +31,20 @@ const RenderingServer = godot.class.RenderingServer;
 const String = godot.builtin.String;
 const StringName = godot.builtin.StringName;
 const PackedByteArray = godot.builtin.PackedByteArray;
+const Rid = godot.builtin.Rid;
 
 const core = @import("core");
 
 const importer_mod = @import("cpu_frame_importer.zig");
 const CpuFrameImporter = importer_mod.CpuFrameImporter;
-const ImportedSurface = importer_mod.ImportedSurface;
 const kPoolDepth = importer_mod.kPoolDepth;
+const surface_mod = @import("surface_importer.zig");
+const Surface = surface_mod.Surface;
+const dispatcher_mod = @import("dispatching_surface_importer.zig");
+const DispatchingImporter = dispatcher_mod.DispatchingImporter;
 const Spec = core.texture_pool.Spec;
 const CpuPlanes = core.backend.CpuPlanes;
+const VideoFrame = core.backend.VideoFrame;
 
 const LunaSelfTest = @This();
 
@@ -82,10 +87,16 @@ chroma: ?[]u8 = null,
 luma10: ?[]u8 = null,
 spec8: Spec = .{ .width = 64, .height = 48, .bit_depth = 8 },
 spec10: Spec = .{ .width = 32, .height = 24, .bit_depth = 10 },
-first: ImportedSurface = undefined,
-ten: ImportedSurface = undefined,
+first: Surface = undefined,
+ten: Surface = undefined,
 have_first: bool = false,
 have_ten: bool = false,
+
+/// 分发器用例（0014）：同一个接口下，CPU 帧走 CPU 路径，平台帧被明确拒绝。
+dispatcher: DispatchingImporter = undefined,
+dispatcher_ready: bool = false,
+dispatched: Surface = undefined,
+have_dispatched: bool = false,
 
 pub fn register(r: *Registry) void {
     const class = r.createClass(LunaSelfTest, r.allocator, .auto);
@@ -158,6 +169,7 @@ pub fn run(self: *LunaSelfTest) String {
     if (self.preparePlanes(&report)) {
         self.importReadbackFrames(&report);
         self.checkPoolSemantics(&report);
+        self.checkDispatcher(&report);
     }
 
     report.note("TOTAL_FAILURES={d}", .{report.failures});
@@ -204,8 +216,8 @@ fn importReadbackFrames(self: *LunaSelfTest, report: *Report) void {
     report.add(after_first == created_before + 2, "首次导入新建两块纹理（亮度 + 色度），实测 {d} 块", .{
         after_first - created_before,
     });
-    report.add(self.importer.rd.textureIsValid(self.first.y), "亮度纹理 RID 有效", .{});
-    report.add(self.importer.rd.textureIsValid(self.first.uv), "色度纹理 RID 有效", .{});
+    report.add(self.importer.rd.textureIsValid(lumaRid(self.first)), "亮度纹理 RID 有效", .{});
+    report.add(self.importer.rd.textureIsValid(chromaRid(self.first)), "色度纹理 RID 有效", .{});
 
     const planes10: CpuPlanes = .{
         .y = self.luma10.?.ptr,
@@ -219,9 +231,9 @@ fn importReadbackFrames(self: *LunaSelfTest, report: *Report) void {
         return;
     };
     self.have_ten = true;
-    report.add(self.importer.rd.textureIsValid(self.ten.y), "10-bit 换了 16 位容器的新纹理，RID 有效", .{});
+    report.add(self.importer.rd.textureIsValid(lumaRid(self.ten)), "10-bit 换了 16 位容器的新纹理，RID 有效", .{});
     report.add(
-        self.importer.rd.textureIsValid(self.first.y),
+        self.importer.rd.textureIsValid(lumaRid(self.first)),
         "规格在帧仍被持有时变化：旧纹理没有被销毁（留作孤儿，等销毁时释放）",
         .{},
     );
@@ -254,7 +266,7 @@ fn checkPoolSemantics(self: *LunaSelfTest, report: *Report) void {
         a.release();
         return;
     };
-    report.add(a.y.getId() != b.y.getId(), "第一帧未归还时，第二帧换另一块纹理（不覆盖在用纹理）", .{});
+    report.add(lumaRid(a).getId() != lumaRid(b).getId(), "第一帧未归还时，第二帧换另一块纹理（不覆盖在用纹理）", .{});
     report.add(pool_importer.stats().created == 4, "并发两帧对应两个槽位（共 {d} 块纹理）", .{
         pool_importer.stats().created,
     });
@@ -271,11 +283,11 @@ fn checkPoolSemantics(self: *LunaSelfTest, report: *Report) void {
         "归还后的槽位被复用，没有新建纹理（仍 {d} 块）",
         .{pool_importer.stats().created},
     );
-    report.add(c.y.getId() == b.y.getId(), "复用的正是刚归还的那一块（轮转而不是线性增长）", .{});
+    report.add(lumaRid(c).getId() == lumaRid(b).getId(), "复用的正是刚归还的那一块（轮转而不是线性增长）", .{});
     c.release();
 
     // 取满：不归还地一直取，直到池说"没有了"。
-    var held: [kPoolDepth]ImportedSurface = undefined;
+    var held: [kPoolDepth]Surface = undefined;
     var held_count: usize = 0;
     while (held_count < kPoolDepth) : (held_count += 1) {
         held[held_count] = pool_importer.import(spec, planes) catch |err| {
@@ -291,7 +303,7 @@ fn checkPoolSemantics(self: *LunaSelfTest, report: *Report) void {
     });
 
     // 空闲时换规格：旧纹理应当**立刻**释放，而不是留成孤儿。
-    const stale_y = a.y;
+    const stale_y = lumaRid(a);
     const generation_before = pool_importer.generation();
     const spec_changed: Spec = .{ .width = 32, .height = 24, .bit_depth = 8 };
     const changed_planes: CpuPlanes = .{
@@ -315,6 +327,67 @@ fn checkPoolSemantics(self: *LunaSelfTest, report: *Report) void {
     resized.release();
 }
 
+/// 运行时分发（0014）：对外只有一张接口，走哪条路由帧的 `surface_kind` 决定。
+fn checkDispatcher(self: *LunaSelfTest, report: *Report) void {
+    self.dispatcher = DispatchingImporter.initWithDevice(
+        self.allocator,
+        self.importer.rd,
+        .{ .cpu_readback = true },
+    ) catch |err| {
+        report.add(false, "建分发器（{s}）", .{@errorName(err)});
+        return;
+    };
+    self.dispatcher_ready = true;
+
+    const cpu_frame: VideoFrame = .{
+        .width = @intCast(self.spec8.width),
+        .height = @intCast(self.spec8.height),
+        .pixel_format = .nv12,
+        .surface_kind = .cpu_nv12,
+        .cpu = .{
+            .y = self.luma.?.ptr,
+            .uv = self.chroma.?.ptr,
+            .y_stride = self.spec8.lumaRowBytes(),
+            .uv_stride = self.spec8.chromaRowBytes(),
+            .bit_depth = 8,
+        },
+    };
+
+    self.dispatched = self.dispatcher.importFrame(cpu_frame) catch |err| {
+        report.add(false, "分发 CPU 帧（{s}）", .{@errorName(err)});
+        return;
+    };
+    self.have_dispatched = true;
+
+    const after_cpu = self.dispatcher.stats();
+    report.add(after_cpu.cpu == 1, "CPU 帧被分给 CPU 上传路径（cpu 计数 {d}）", .{after_cpu.cpu});
+    report.add(after_cpu.platform == 0 and after_cpu.rejected == 0, "此时平台计数与拒绝计数都还是 0（platform={d} rejected={d}）", .{
+        after_cpu.platform, after_cpu.rejected,
+    });
+    report.add(self.dispatched.planes == .luma_chroma, "CPU 路径交出的是「亮度 + 交织色度」两块纹理", .{});
+    report.add(self.dispatched.spec.eql(self.spec8), "分发结果带着帧自己的规格（{d}x{d}）", .{
+        self.dispatched.spec.width, self.dispatched.spec.height,
+    });
+
+    // 平台帧：没有平台导入器时必须**明确拒绝**，而不是"想办法"退回 CPU 路径——
+    // 平台帧根本没有 CPU 平面可上传（与 0009 的"hardware 档绝不悄悄落软解"同源）。
+    const native_frame: VideoFrame = .{
+        .width = @intCast(self.spec8.width),
+        .height = @intCast(self.spec8.height),
+        .pixel_format = .nv12,
+        .surface_kind = .native_surface,
+        .native_handle = null,
+    };
+    const native_refused = if (self.dispatcher.importFrame(native_frame)) |_| false else |err| err == error.UnsupportedFrame;
+    report.add(native_refused, "平台帧在缺平台导入器时被明确拒绝（UnsupportedFrame）", .{});
+
+    const after_native = self.dispatcher.stats();
+    report.add(after_native.rejected == 1, "拒绝被如实计数（rejected={d}）", .{after_native.rejected});
+    report.add(after_native.cpu == 1, "拒绝平台帧时没有偷偷走 CPU 路径（cpu 计数仍为 {d}）", .{
+        after_native.cpu,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 第二阶段：回读比对（必须在引擎提交过一帧之后）
 // ---------------------------------------------------------------------------
@@ -336,11 +409,11 @@ pub fn verify(self: *LunaSelfTest) String {
     self.importer.rd.submit();
     self.importer.rd.sync();
 
-    var y_back = self.importer.rd.textureGetData(self.first.y, 0);
+    var y_back = self.importer.rd.textureGetData(lumaRid(self.first), 0);
     defer y_back.deinit();
-    var uv_back = self.importer.rd.textureGetData(self.first.uv, 0);
+    var uv_back = self.importer.rd.textureGetData(chromaRid(self.first), 0);
     defer uv_back.deinit();
-    var y10_back = self.importer.rd.textureGetData(self.ten.y, 0);
+    var y10_back = self.importer.rd.textureGetData(lumaRid(self.ten), 0);
     defer y10_back.deinit();
 
     report.add(y_back.size() == @as(i64, @intCast(y_want.len)), "亮度回读字节数 == {d}（实际 {d}）", .{
@@ -356,6 +429,13 @@ pub fn verify(self: *LunaSelfTest) String {
     report.add(equalBytes(uv_back, uv_want), "8-bit 色度平面：上传什么就回读什么（逐字节）", .{});
     report.add(equalBytes(y10_back, y10_want), "10-bit 亮度平面：逐字节回读一致", .{});
 
+    // 分发器交出来的那块走的是同一条上传路径，同样要能逐字节读回。
+    if (self.have_dispatched) {
+        var dispatched_back = self.dispatcher.cpu.rd.textureGetData(lumaRid(self.dispatched), 0);
+        defer dispatched_back.deinit();
+        report.add(equalBytes(dispatched_back, y_want), "分发路径交出的纹理同样逐字节一致", .{});
+    }
+
     report.note("第一阶段创建纹理 {d} 块、上传平面 {d} 次、孤儿 {d} 块", .{
         self.importer.stats().created,
         self.importer.stats().uploads,
@@ -368,6 +448,14 @@ pub fn verify(self: *LunaSelfTest) String {
 }
 
 fn teardown(self: *LunaSelfTest) void {
+    if (self.have_dispatched) {
+        self.dispatched.release();
+        self.have_dispatched = false;
+    }
+    if (self.dispatcher_ready) {
+        self.dispatcher.deinit();
+        self.dispatcher_ready = false;
+    }
     if (self.have_first) {
         self.first.release();
         self.have_first = false;
@@ -392,6 +480,16 @@ fn teardown(self: *LunaSelfTest) void {
         self.allocator.free(b);
         self.luma10 = null;
     }
+}
+
+/// CPU 上传路径的纹理摆法是"亮度 + 交织色度"，这里把取用点收敛成两个小助手，
+/// 免得每个断言里都写一遍 union 的字段路径。
+fn lumaRid(surface: Surface) Rid {
+    return surface.planes.luma_chroma.luma;
+}
+
+fn chromaRid(surface: Surface) Rid {
+    return surface.planes.luma_chroma.chroma;
 }
 
 /// 逐字节比较一个回读结果。
