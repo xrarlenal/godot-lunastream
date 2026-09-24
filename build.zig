@@ -4,7 +4,8 @@ const Build = std.Build;
 /// LunaStream 构建入口。
 ///
 /// 现阶段只搭建 core（与 Godot 无关的纯 Zig 逻辑）的构建与测试。
-/// GDExtension 目标（需要 gdzig 绑定与 Godot 头文件）在第 19 个功能点接入。
+/// GDExtension 目标（需要 gdzig 绑定与 Godot 头文件）在推进表中的
+/// "VideoStream / VideoStreamPlayback / 资源加载器"那一步接入，见 docs/ROADMAP.md。
 pub fn build(b: *Build) !void {
     const target = b.standardTargetOptions(.{});
     // 与源工程一致的取值方式：0.16 的 standardOptimizeOption 语义与这里不同，
