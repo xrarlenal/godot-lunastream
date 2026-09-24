@@ -18,6 +18,7 @@ pub const color = @import("color.zig");
 pub const sys_clock = @import("sys_clock.zig");
 pub const backend = @import("backend.zig");
 pub const decode_scheduler = @import("decode_scheduler.zig");
+pub const playback_state = @import("playback_state.zig");
 
 test "core 模块可以编译并被引用" {
     try std.testing.expect(version.len > 0);
