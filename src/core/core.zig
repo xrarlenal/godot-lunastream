@@ -6,8 +6,8 @@
 
 const std = @import("std");
 
-/// 语义化版本，与仓库 tag 同步。
-pub const version = "0.0.0";
+/// 语义化版本，与仓库 tag 同步（0.1.0 = 第一个公开 release）。
+pub const version = "0.1.0";
 
 pub const clock = @import("clock.zig");
 pub const frame_queue = @import("frame_queue.zig");

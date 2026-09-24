@@ -16,6 +16,25 @@ source_dir="${1:-example/gdextension-smoke/addons/lunastream}"
 ffmpeg_prefix="${FFMPEG_PREFIX:-/opt/homebrew}"
 out_dir="dist/addons/lunastream"
 
+# 只带**本平台**的产物。示例工程的 addons/ 里可能同时躺着交叉编译出来的
+# lunastream.dll / liblunastream.so（那是别的平台、且没在真机上验证过），
+# 把它们打进 macOS 的发布包只会误导使用者。
+case "$(uname -s)" in
+Darwin)
+	host_kind="macOS"
+	lib_glob="*.dylib"
+	;;
+Linux)
+	host_kind="Linux"
+	lib_glob="*.so"
+	;;
+*)
+	host_kind="Windows"
+	lib_glob="*.dll"
+	;;
+esac
+echo "平台：${host_kind}（只带 ${lib_glob}）"
+
 if [ ! -d "$source_dir" ]; then
 	echo "找不到构建产物目录：$source_dir（先跑一次 zig build）" >&2
 	exit 2
@@ -25,13 +44,14 @@ rm -rf "$out_dir"
 mkdir -p "$out_dir"
 
 # 1. 扩展本体与清单（清单里的库路径是相对的，必须同目录）。
-for f in "$source_dir"/*.dylib "$source_dir"/*.so "$source_dir"/*.dll "$source_dir"/*.gdextension; do
+for f in "$source_dir"/$lib_glob "$source_dir"/*.gdextension; do
 	[ -e "$f" ] || continue
 	cp "$f" "$out_dir/"
 done
 
-# 2. 随包的 Vulkan Layer（Linux）——清单与 .so 必须同目录，所以整个 luna_layer/ 一起带。
-if [ -d "$source_dir/luna_layer" ]; then
+# 2. 随包的 Vulkan Layer（**只对 Linux 有意义**）——清单与 .so 必须同目录，
+#    所以整个 luna_layer/ 一起带；别的平台带了只是噪音（且会让人以为要用它）。
+if [ "$host_kind" = "Linux" ] && [ -d "$source_dir/luna_layer" ]; then
 	mkdir -p "$out_dir/luna_layer"
 	cp "$source_dir"/luna_layer/* "$out_dir/luna_layer/" 2>/dev/null || true
 fi
