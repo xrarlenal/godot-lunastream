@@ -223,6 +223,20 @@ pub fn build(b: *Build) !void {
         },
     });
 
+    // 平台导入器需要的原生桥。头文件在所有平台都可见（自检要引用它的类型），
+    // 但只有 macOS 才编译 Objective-C 实现并链框架——Windows / Linux 各有自己的
+    // 平台导入器（0016 / 0017）。
+    ext_mod.addIncludePath(b.path("src/ffvt"));
+    if (target.result.os.tag == .macos) {
+        ext_mod.addCSourceFile(.{
+            .file = b.path("src/ffvt/cv_metal_bridge.m"),
+            .flags = &.{ "-fno-objc-arc" },
+        });
+        for ([_][]const u8{ "Metal", "CoreVideo", "CoreGraphics", "Foundation" }) |framework| {
+            ext_mod.linkFramework(framework, .{});
+        }
+    }
+
     const extension = gdzig.addExtension(b, .{
         .name = "lunastream",
         .root_module = ext_mod,

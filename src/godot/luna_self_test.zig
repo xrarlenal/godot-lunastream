@@ -21,13 +21,17 @@
 //! 尺寸对、内容全零（src[0..8]=000102…，back 全 0）。
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const godot = @import("godot");
 const Registry = godot.extension.Registry;
 const Object = godot.class.Object;
 const RefCounted = godot.class.RefCounted;
+const RenderingDevice = godot.class.RenderingDevice;
 const RenderingServer = godot.class.RenderingServer;
+const RdTextureFormat = godot.class.RdTextureFormat;
+const RdTextureView = godot.class.RdTextureView;
 const String = godot.builtin.String;
 const StringName = godot.builtin.StringName;
 const PackedByteArray = godot.builtin.PackedByteArray;
@@ -42,6 +46,10 @@ const surface_mod = @import("surface_importer.zig");
 const Surface = surface_mod.Surface;
 const dispatcher_mod = @import("dispatching_surface_importer.zig");
 const DispatchingImporter = dispatcher_mod.DispatchingImporter;
+const metal_mod = @import("metal_surface_importer.zig");
+const bridge = @cImport({
+    @cInclude("cv_metal_bridge.h");
+});
 const Spec = core.texture_pool.Spec;
 const CpuPlanes = core.backend.CpuPlanes;
 const VideoFrame = core.backend.VideoFrame;
@@ -97,6 +105,13 @@ dispatcher: DispatchingImporter = undefined,
 dispatcher_ready: bool = false,
 dispatched: Surface = undefined,
 have_dispatched: bool = false,
+
+/// Metal 零拷贝用例（0015）：自己造一块 IOSurface 支撑的 CVPixelBuffer 喂进去。
+metal: ?metal_mod.MetalSurfaceImporter = null,
+metal_surface: Surface = undefined,
+have_metal_surface: bool = false,
+metal_luma_expect: ?[]u8 = null,
+metal_chroma_expect: ?[]u8 = null,
 
 pub fn register(r: *Registry) void {
     const class = r.createClass(LunaSelfTest, r.allocator, .auto);
@@ -170,6 +185,7 @@ pub fn run(self: *LunaSelfTest) String {
         self.importReadbackFrames(&report);
         self.checkPoolSemantics(&report);
         self.checkDispatcher(&report);
+        self.checkMetalImport(&report);
     }
 
     report.note("TOTAL_FAILURES={d}", .{report.failures});
@@ -388,6 +404,108 @@ fn checkDispatcher(self: *LunaSelfTest, report: *Report) void {
     });
 }
 
+/// Metal 零拷贝（0015）：自己造一块 IOSurface 支撑的 CVPixelBuffer 喂进分发器。
+///
+/// 为什么能"自己造"：本仓库还没有硬解后端（ffvt 未落地），而这个导入器吃的正是
+/// 硬解帧的形状（native_surface + CVPixelBuffer）。造假输入的代价只是几十行桥代码，
+/// 换来的是零拷贝路径能在真机上被验证——包括"与像素缓冲行距不一致"这种一上手就会
+/// 踩到的坑。
+fn checkMetalImport(self: *LunaSelfTest, report: *Report) void {
+    if (builtin.os.tag != .macos) {
+        report.note("跳过 Metal 零拷贝用例（当前平台不是 macOS）", .{});
+        return;
+    }
+    if (!self.dispatcher_ready) {
+        report.add(false, "分发器没建起来，Metal 用例无法挂上去", .{});
+        return;
+    }
+
+    const width: u32 = 64;
+    const height: u32 = 48;
+    const probe = bridge.nv_cv_probe_create(@intCast(width), @intCast(height)) orelse {
+        report.add(false, "造一块 IOSurface 支撑的 NV12 像素缓冲", .{});
+        return;
+    };
+    defer bridge.nv_cv_probe_destroy(probe);
+    report.add(true, "造出 IOSurface 支撑的 NV12 像素缓冲（{d}x{d}）", .{ width, height });
+
+    const luma = bridge.nv_cv_probe_luma(probe);
+    const chroma = bridge.nv_cv_probe_chroma(probe);
+    if (luma == null or chroma == null) {
+        report.add(false, "两个平面都可写（缓冲已锁定）", .{});
+        return;
+    }
+    report.add(true, "两个平面都可写（缓冲已锁定）", .{});
+    const luma_stride: usize = @intCast(bridge.nv_cv_probe_luma_stride(probe));
+    const chroma_stride: usize = @intCast(bridge.nv_cv_probe_chroma_stride(probe));
+
+    // 期望值按**紧凑**布局留一份（纹理那边就是紧凑的），于是"缓冲行距与纹理行距
+    // 不同"这件事被真正验证：别名若把行距搞错，逐行比对会立刻红。
+    const luma_expect = self.allocator.alloc(u8, @as(usize, width) * height) catch return;
+    const chroma_expect = self.allocator.alloc(u8, @as(usize, width) * (height / 2)) catch return;
+    self.metal_luma_expect = luma_expect;
+    self.metal_chroma_expect = chroma_expect;
+
+    var row: usize = 0;
+    while (row < height) : (row += 1) {
+        var col: usize = 0;
+        while (col < width) : (col += 1) {
+            const value: u8 = @truncate(row * 3 + col);
+            luma[row * luma_stride + col] = value;
+            luma_expect[row * width + col] = value;
+        }
+    }
+    row = 0;
+    while (row < height / 2) : (row += 1) {
+        var col: usize = 0;
+        while (col < width) : (col += 1) {
+            const value: u8 = @truncate(row * 5 + col * 2 + 1);
+            chroma[row * chroma_stride + col] = value;
+            chroma_expect[row * width + col] = value;
+        }
+    }
+    report.note("像素缓冲行距：亮度 {d}、色度 {d}（纹理侧是紧凑的 {d}）", .{
+        luma_stride, chroma_stride, width,
+    });
+
+    self.metal = metal_mod.MetalSurfaceImporter.initWithDevice(
+        self.allocator,
+        self.importer.rd,
+        .{ .cpu_readback = true },
+    ) catch |err| {
+        report.add(false, "建 Metal 导入器（{s}）", .{@errorName(err)});
+        return;
+    };
+    // 挂到分发器上：这一段同时验证 0014 的平台路由确实把帧送了过来。
+    self.dispatcher.setPlatform(self.metal.?.asSurfaceImporter());
+
+    const frame: VideoFrame = .{
+        .width = @intCast(width),
+        .height = @intCast(height),
+        .pixel_format = .nv12,
+        .surface_kind = .native_surface,
+        .native_handle = bridge.nv_cv_probe_pixel_buffer(probe),
+        .cpu = .{ .bit_depth = 8 },
+    };
+    const before = self.dispatcher.stats();
+    self.metal_surface = self.dispatcher.importFrame(frame) catch |err| {
+        report.add(false, "把原生帧交给 Metal 导入器（{s}）", .{@errorName(err)});
+        return;
+    };
+    self.have_metal_surface = true;
+
+    const after = self.dispatcher.stats();
+    report.add(after.platform == before.platform + 1, "原生帧被分给 Metal 导入器（platform 计数 {d}）", .{
+        after.platform,
+    });
+    report.add(after.cpu == before.cpu, "走平台路径时没有动 CPU 计数（仍 {d}）", .{after.cpu});
+    report.add(self.metal_surface.planes == .luma_chroma, "Metal 路径交出亮度 + 交织色度两块纹理", .{});
+    const metal_stats = self.metal.?.stats();
+    report.add(metal_stats.in_flight == 1 and metal_stats.textures == 2, "导入器记账：在飞 {d} 帧、创建 {d} 块纹理", .{
+        metal_stats.in_flight, metal_stats.textures,
+    });
+}
+
 // ---------------------------------------------------------------------------
 // 第二阶段：回读比对（必须在引擎提交过一帧之后）
 // ---------------------------------------------------------------------------
@@ -436,6 +554,58 @@ pub fn verify(self: *LunaSelfTest) String {
         report.add(equalBytes(dispatched_back, y_want), "分发路径交出的纹理同样逐字节一致", .{});
     }
 
+    // Metal 零拷贝：读回的必须是像素缓冲里我们写进去的内容，而且按纹理自己的
+    // 紧凑行距（与像素缓冲的行距不同）逐行对上。
+    if (self.have_metal_surface) {
+        // **不能**直接 textureGetData 那块别名进来的纹理：Godot 的 Metal 驱动在
+        // drivers/metal/rendering_device_driver_metal.mm:585 直接拒绝（实测，日志里
+        // 会打出这条 driver 报错），所以先在 GPU 内部把它拷到一块 Godot 自己创建的
+        // 暂存纹理，再读暂存纹理。
+        const width: u32 = 64;
+        const height: u32 = 48;
+        const luma_staging = createStagingTexture(self.importer.rd, width, height, .data_format_r8_unorm);
+        const chroma_staging = createStagingTexture(self.importer.rd, width / 2, height / 2, .data_format_r8g8_unorm);
+        defer {
+            if (self.importer.rd.textureIsValid(luma_staging)) self.importer.rd.freeRid(luma_staging);
+            if (self.importer.rd.textureIsValid(chroma_staging)) self.importer.rd.freeRid(chroma_staging);
+        }
+
+        self.importer.rd.submit();
+        self.importer.rd.sync();
+        const copied_luma = self.importer.rd.textureCopy(
+            lumaRid(self.metal_surface),
+            luma_staging,
+            .{ .x = 0, .y = 0, .z = 0 },
+            .{ .x = 0, .y = 0, .z = 0 },
+            .{ .x = @floatFromInt(width), .y = @floatFromInt(height), .z = 1 },
+            0,
+            0,
+            0,
+            0,
+        ) == .ok;
+        const copied_chroma = self.importer.rd.textureCopy(
+            chromaRid(self.metal_surface),
+            chroma_staging,
+            .{ .x = 0, .y = 0, .z = 0 },
+            .{ .x = 0, .y = 0, .z = 0 },
+            .{ .x = @floatFromInt(width / 2), .y = @floatFromInt(height / 2), .z = 1 },
+            0,
+            0,
+            0,
+            0,
+        ) == .ok;
+        report.add(copied_luma and copied_chroma, "把别名纹理拷进暂存纹理（GPU 内部拷贝）", .{});
+
+        self.importer.rd.submit();
+        self.importer.rd.sync();
+        var metal_luma = self.importer.rd.textureGetData(luma_staging, 0);
+        defer metal_luma.deinit();
+        var metal_chroma = self.importer.rd.textureGetData(chroma_staging, 0);
+        defer metal_chroma.deinit();
+        report.add(equalBytes(metal_luma, self.metal_luma_expect.?), "Metal 零拷贝：亮度平面逐字节一致", .{});
+        report.add(equalBytes(metal_chroma, self.metal_chroma_expect.?), "Metal 零拷贝：色度平面逐字节一致", .{});
+    }
+
     report.note("第一阶段创建纹理 {d} 块、上传平面 {d} 次、孤儿 {d} 块", .{
         self.importer.stats().created,
         self.importer.stats().uploads,
@@ -448,6 +618,22 @@ pub fn verify(self: *LunaSelfTest) String {
 }
 
 fn teardown(self: *LunaSelfTest) void {
+    if (self.have_metal_surface) {
+        self.metal_surface.release();
+        self.have_metal_surface = false;
+    }
+    if (self.metal) |*importer| {
+        importer.deinit();
+        self.metal = null;
+    }
+    if (self.metal_luma_expect) |b| {
+        self.allocator.free(b);
+        self.metal_luma_expect = null;
+    }
+    if (self.metal_chroma_expect) |b| {
+        self.allocator.free(b);
+        self.metal_chroma_expect = null;
+    }
     if (self.have_dispatched) {
         self.dispatched.release();
         self.have_dispatched = false;
@@ -490,6 +676,25 @@ fn lumaRid(surface: Surface) Rid {
 
 fn chromaRid(surface: Surface) Rid {
     return surface.planes.luma_chroma.chroma;
+}
+
+/// 自检用的暂存纹理：Godot 自己创建的、可拷贝来源也可是拷贝目标、还能被 CPU 读回。
+/// 用来绕开"Metal 驱动不给读别名进来的纹理"这条限制（见 verify 里的注释）。
+fn createStagingTexture(rd: *RenderingDevice, width: u32, height: u32, format: RenderingDevice.DataFormat) Rid {
+    const fmt = RdTextureFormat.init();
+    defer _ = fmt.unreference();
+    const view = RdTextureView.init();
+    defer _ = view.unreference();
+    fmt.setWidth(width);
+    fmt.setHeight(height);
+    fmt.setFormat(format);
+    fmt.setUsageBits(.{
+        .texture_usage_sampling_bit = true,
+        .texture_usage_can_copy_to_bit = true,
+        .texture_usage_can_copy_from_bit = true,
+        .texture_usage_cpu_read_bit = true,
+    });
+    return rd.textureCreate(fmt, view, .{});
 }
 
 /// 逐字节比较一个回读结果。
