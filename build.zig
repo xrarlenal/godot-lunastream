@@ -307,6 +307,7 @@ pub fn build(b: *Build) !void {
         backend_smoke_run.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "ffsw-selftest", "clip8.mp4" }));
         backend_smoke_run.step.dependOn(&gen8.step);
         backend_smoke_step.dependOn(&backend_smoke_run.step);
+
     }
 
     // 平台导入器需要的原生桥。头文件在所有平台都可见（自检要引用它的类型），
@@ -428,4 +429,27 @@ pub fn build(b: *Build) !void {
     run_importer.stdio = .inherit;
     run_importer.step.dependOn(&install.step);
     importer_step.dependOn(&run_importer.step);
+
+    // --- 播放烟测（0018）：真的播一段流 ---
+    //
+    // 与上面那个的分工：importer-selftest 验证"导入器与呈现管线单独正确"，
+    // 这个验证"接起来之后 VideoStreamPlayer 真的能播"。
+    // 同样需要带渲染上下文的 Godot（呈现管线要 RenderingDevice），所以不加 --headless。
+    // 片源路径用 `--` 传给脚本（Godot 的 OS.get_cmdline_user_args()），
+    // 复用 ffsw-selftest 生成的那个片源。
+    const playback_step = b.step("godot-playback-smoke", "播放烟测：真的播一段流（需要带渲染上下文的 Godot）");
+    const run_playback = b.addSystemCommand(&.{
+        godot_bin,
+        "--path",
+        "example/gdextension-smoke",
+        "--quit-after",
+        "1800",
+        "res://playback_smoke.tscn",
+        "--",
+    });
+    run_playback.addArg(b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "ffsw-selftest", "clip8.mp4" }));
+    run_playback.stdio = .inherit;
+    run_playback.step.dependOn(&install.step);
+    run_playback.step.dependOn(&gen8.step);
+    playback_step.dependOn(&run_playback.step);
 }

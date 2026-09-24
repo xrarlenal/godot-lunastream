@@ -8,7 +8,9 @@
 //! 本步（0003）的边界：只证明"类能注册、属性与方法的绑定能用"。
 //! `_instantiate_playback()` 返回 null，真正的播放实现落在 VideoStream 集成那一步。
 
-const LunaVideoStream = @This();
+/// 公开类型名：播放实现要能命名它（两者是双向引用的关系）。类名仍来自**文件名**
+/// （gdzig 取 `@typeName` 的短名），所以这里加 `pub` 不影响注册出来的 Godot 类名。
+pub const LunaVideoStream = @This();
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -41,6 +43,11 @@ base: *VideoStream,
 /// 真正的决策逻辑（含硬解名额预算）由后端选择器那一步接线。
 decoder_choice: i64 = 0,
 
+/// 最近一次交给 VideoStreamPlayer 的播放实例（诊断用）。
+/// 它是**借来的指针**：真正的所有权在引擎那边，播放实例销毁时会把它清成 null
+///（见 LunaVideoStreamPlayback.destroy），所以这里读之前先判空、并且只读它的计数。
+last_playback: ?*LunaVideoStreamPlayback = null,
+
 // ---------------------------------------------------------------------------
 // 注册
 // ---------------------------------------------------------------------------
@@ -49,10 +56,26 @@ pub fn register(r: *Registry) void {
     const class = r.createClass(LunaVideoStream, r.allocator, .auto);
     class.addMethod("ping", .auto);
     class.addMethod("release_creator_ref", .auto);
+    // 诊断入口：自检脚本通过流来问"最近一路流呈现了多少帧 / 有没有报错"。
+    // 为什么不问 VideoStreamPlayer：Godot 4.6 没有暴露 get_stream_playback()。
+    class.addMethod("get_frames_presented", .auto);
+    class.addMethod("get_last_error", .auto);
     class.addProperty("decoder", .{
         .hint = .property_hint_enum,
         .hint_string = String.fromLatin1("auto,hardware,software"),
     });
+}
+
+/// 最近一路流已经呈现的帧数；没有播放实例时是 0。
+pub fn getFramesPresented(self: *LunaVideoStream) i64 {
+    if (self.last_playback) |playback| return playback.getFramesPresented();
+    return 0;
+}
+
+/// 最近一路流的错误文本；没有播放实例时是空串。
+pub fn getLastError(self: *LunaVideoStream) String {
+    if (self.last_playback) |playback| return playback.getLastError();
+    return String.fromUtf8("") catch String.empty;
 }
 
 pub fn unregister(r: *Registry) void {
@@ -85,6 +108,12 @@ pub fn recreate(allocator: *Allocator, obj: *Object) *LunaVideoStream {
 }
 
 pub fn destroy(self: *LunaVideoStream, allocator: *Allocator) void {
+    // 双向引用的另一半：流先被释放时，必须把播放实例里指回来的那个指针清掉，
+    // 否则播放实例后来销毁时会对着一块已经释放的内存写 null（实测直接 ABRT）。
+    if (self.last_playback) |playback| {
+        playback.owner_stream = null;
+        self.last_playback = null;
+    }
     // 这里**不能**写 `self.base.destroy()`（源工程与 gdzig 的示例都是这么写的）。
     //
     // 原因：gdzig 为具体类生成的 `destroy` 带一层守卫——
@@ -152,6 +181,8 @@ pub fn _instantiatePlayback(self: *LunaVideoStream) ?*VideoStreamPlayback {
     if (path.size() <= 0) return null;
 
     const playback = LunaVideoStreamPlayback.create(&self.allocator) catch return null;
+    playback.owner_stream = self;
+    self.last_playback = playback;
     // 把 C 侧的字节转成切片：`toAsciiBuffer()` 出来的 PackedByteArray 去掉结尾的 0。
     const raw: [*]const u8 = @ptrFromInt(@intFromPtr(path.indexConst(0)));
     const len: usize = @intCast(path.size());

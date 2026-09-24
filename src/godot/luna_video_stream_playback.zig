@@ -61,6 +61,10 @@ const default_worker_count = 1;
 allocator: Allocator,
 base: *VideoStreamPlayback,
 
+/// 交出去时记住是哪一路流（诊断用：流那边要能问"呈现了多少帧"）。
+/// 这是**双向引用**，所以在 destroy 里必须显式清掉对方那一侧，否则流会留下悬垂指针。
+owner_stream: ?*@import("luna_video_stream.zig").LunaVideoStream = null,
+
 backend: ffsw.FfswBackend = undefined,
 backend_open: bool = false,
 scheduler: ?*DecodeScheduler = null,
@@ -83,6 +87,10 @@ last_error: ?[]const u8 = null,
 pub fn register(r: *Registry) void {
     const class = r.createClass(LunaVideoStreamPlayback, r.allocator, .auto);
     class.addMethod("release_creator_ref", .auto);
+    // 诊断入口：自检脚本要能问"已经呈现了多少帧"。虚函数（_play 等）由 gdzig 自动
+    // 按基类虚表注册，这两个是我们自己的，必须显式挂上。
+    class.addMethod("get_frames_presented", .auto);
+    class.addMethod("get_last_error", .auto);
 }
 
 pub fn unregister(r: *Registry) void {
@@ -104,6 +112,10 @@ pub fn recreate(allocator: *Allocator, obj: *Object) *LunaVideoStreamPlayback {
 }
 
 pub fn destroy(self: *LunaVideoStreamPlayback, allocator: *Allocator) void {
+    if (self.owner_stream) |stream| {
+        stream.last_playback = null;
+        self.owner_stream = null;
+    }
     self.teardown();
     Object.upcast(self.base).destroy();
     allocator.destroy(self);
@@ -198,7 +210,14 @@ fn teardown(self: *LunaVideoStreamPlayback) void {
         self.dispatcher = null;
     }
     if (self.scheduler) |scheduler| {
-        if (self.stream) |stream| scheduler.unregisterStream(stream);
+        if (self.stream) |stream| {
+            // 注销会把后端一并关掉并释放：0007 的 unregisterStream →
+            // releaseStreamResources → backend.close() + backend.deinit()。
+            // 所以这里**不能**自己再释放一次——第一版就是多释放了一次，退出时崩在
+            // nv_ffsw_destroy → avcodec_free_context（拿已经释放的句柄再释放）。
+            scheduler.unregisterStream(stream);
+            self.backend_open = false;
+        }
         scheduler.deinit();
         self.scheduler = null;
         self.stream = null;
@@ -304,7 +323,9 @@ pub fn getFramesPresented(self: *LunaVideoStreamPlayback) i64 {
 }
 
 pub fn getLastError(self: *LunaVideoStreamPlayback) String {
-    return String.fromLatin1(self.last_error orelse "");
+    // 必须用 fromUtf8：这些消息是 UTF-8 的中文，fromLatin1 会把它们按 Latin-1 解释，
+    // 脚本侧看到的就是乱码（实测：`æå¼å¤±è´¥...`）。
+    return String.fromUtf8(self.last_error orelse "") catch String.empty;
 }
 
 // ---------------------------------------------------------------------------
