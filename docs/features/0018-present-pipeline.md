@@ -106,9 +106,57 @@ core 的色彩层精确算出来。于是这两条断言同时钉住：**中性�
 
 ## 还差什么（本功能点尚未完成）
 
-- `VideoStreamPlayback` 的接线：把"解码调度 → 导入 → 呈现"串起来，实现 `_play` /
-- `_stop` / `_get_texture` 等虚函数，`VideoStreamPlayer` 才真的能播。
 - 资源加载器：`file = "rtsp://..."` 这类 URL 的识别与文档化。
 - 目前呈现只支持"两块平面"（`luma_chroma`）；平台路径若只给一块交织纹理
   （`interleaved_single`）还没有对应的着色器分支。
 - 分辨率变化时还没有重建管线（现在假设尺寸固定）。
+- 平台导入器在播放类里还没挂上（macOS 的 Metal 导入器需要硬解帧，见 0015 的已知限制）。
+- 退出时仍有 `ObjectDB instances leaked at exit`（0022 的老账，见下）。
+
+## 播放接线与端到端验证（已完成）
+
+`src/godot/luna_video_stream_playback.zig` 把零件串成一条链路：
+
+```
+ffsw 后端 → DecodeScheduler → DispatchingImporter → PresentPipeline → Texture2DRD
+```
+
+每个渲染帧 `_update` 走一遍"取一帧 → 导入 → 呈现 → 重指 Texture2DRD"；音频相关的
+三个虚函数如实返回"没有音频"，`_seek` 是空操作——与"视频源不是播放器"的定位一致。
+`LunaVideoStream._instantiatePlayback()` 现在真的返回它。
+
+**验证方式是"真的播一段流"**（`zig build godot-playback-smoke`）：
+
+```
+PASS  拿到了视频纹理（Texture2DRD）
+PASS  纹理尺寸来自片源  320x240
+PASS  呈现的帧数在增长  frames=10（跑了 11 帧）
+PASS  播放位置在推进  0.36
+PASS  没有报错
+RESULT=PASS（退出码 0）
+```
+
+### 这一步修掉的三个真问题
+
+1. **后端被释放两次**（退出时 SIGSEGV/ABRT，崩在 `nv_ffsw_destroy → avcodec_free_context`）。
+   根因：0007 的 `unregisterStream` 会走到 `releaseStreamResources`，里面已经
+   `backend.close() + backend.deinit()`，而我在 `teardown` 里又释放了一次。现在注销时
+   把所有权交出去，只有"开了但没注册"才自己释放。
+   中途我按**错误判断**加过"对象不释放 + magic 守卫"的临时处置；定位到真因后已撤回，
+   并在注释里写清为什么会误判（崩溃栈只指到 avcodec_free_context，看不出是谁调了两次）。
+2. **相对路径**：构建步骤传的是相对仓库根的路径，而 Godot 会 chdir 到工程目录，
+   于是打开失败。脚本里折算成绝对路径。
+3. **中文错误文本变乱码**：`String.fromLatin1` 会在把 UTF-8 字节按 Latin-1 解释，
+   改用 `String.fromUtf8`。
+
+### 一个接口事实（值得记）
+
+Godot 4.6 **没有**暴露 `VideoStreamPlayer.get_stream_playback()`，所以诊断入口
+（`get_frames_presented` / `get_last_error`）挂在 `LunaVideoStream` 上：流记住自己交出去
+的播放实例，两侧 `destroy` 都会把对方那个指针清掉（双向引用必须两边都清，否则就是
+悬垂指针）。同一模式在 0013 的 `ImportedSurface.release` 上也用过。
+
+### 仍然在的账
+
+退出时那条 `ObjectDB instances leaked at exit` 还在（0022）。本步没有碰它——它是
+独立条目，且**不影响播放正确性**（播放本身已经逐项验证过）。
