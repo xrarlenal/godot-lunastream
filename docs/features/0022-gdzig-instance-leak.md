@@ -209,6 +209,35 @@ CPU 导入器与呈现管线改成**复用一个** `RDTextureFormat` / `RDTextur
 一次、之后反复改写），而不是每建一块纹理造一对。播放烟测的残留 13 → 11，且省掉了
 每次创建的引擎调用（12 槽的池原来意味着 12 对描述符对象）。
 
+## 二分结果：残留可以逐项对上了（用完 `unreference` 也不走）
+
+把导入器自检的清单按类型归并（`--verbose` 输出的 28 条）：
+
+| 类型 | 条数 | refcount | 对上什么 |
+|---|---|---|---|
+| `RDUniform` | 9 | **1** | 3 个 uniform set × 3 个 uniform（set 重建过） |
+| `RDTextureFormat` | 7 | 0 | 正好是"4 对复用字段 + 3 对转储纹理" |
+| `RDTextureView` | 7 | 0 | 同上 |
+| `RDShaderSource` / `RDShaderSPIRV` / `RDSamplerState` | 各 1 | 0 | 呈现管线各建一次 |
+| `RenderingDevice` | 1 | — | 自检创建的**本地设备**（见下） |
+| `Object` | 1 | — | 本地设备的伴生对象 |
+
+两条由此得到的确切结论：
+
+1. **"描述符对象被用于创建 RID 之后，即使 refcount 归零也不会从 ObjectDB 摘除"**。
+   对照实验：单纯 `init()` + `unreference()`（不夹 `textureCreate`）4 次，残留数
+   纹丝不动；而经过 `textureCreate` 的那 7 对全部留下。所以减少它们只有一条路——
+   **少建**（已经做掉的部分：导入器与管线复用一个 format/view）。
+2. **本地 RenderingDevice 释放不了**：gdzig 的绑定里没有 `free_rendering_device`
+   （Godot 文档要求用它销毁本地设备），而 `RenderingDevice` 的基类是 `Object` 而不是
+   `RefCounted`，所以也走不了 `unreference()`。这是绑定缺口；正式代码不用本地设备
+   （只有自检用），影响限于测试进程。
+
+`RDUniform` 那 9 条是唯一"还能靠改我们自己的代码压下去"的部分：它们随 uniform set 的
+数量线性增长，而 set 只在"纹理对变了"时重建（软解路径复用纹理，所以生产中很少）。
+要彻底消掉，需要把 descriptor 的创建挪到不需要它的路径上——那要改 gdzig 或改用
+引擎提供的其它入口。
+
 ## 下一步（有基线，可确定性推进）
 
 1. **逐调用点二分**：把 `createStagingTexture`、`cpu_frame_importer.createTexture`、

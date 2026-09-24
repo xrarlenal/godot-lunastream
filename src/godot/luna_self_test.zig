@@ -101,6 +101,8 @@ base: *RefCounted,
 /// 跨帧保留：待回读的两帧的纹理，以及它们对应的"应该是什么"。
 importer: CpuFrameImporter = undefined,
 importer_ready: bool = false,
+/// 自检自己创建的**本地** RenderingDevice（我们建的，就得我们销毁）。
+local_rd: ?*RenderingDevice = null,
 luma: ?[]u8 = null,
 chroma: ?[]u8 = null,
 luma10: ?[]u8 = null,
@@ -198,6 +200,7 @@ pub fn run(self: *LunaSelfTest) String {
         report.note("TOTAL_FAILURES=1", .{});
         return report.text();
     };
+    self.local_rd = local_rd;
     self.importer_ready = true;
 
     if (self.preparePlanes(&report)) {
@@ -891,6 +894,12 @@ fn teardown(self: *LunaSelfTest) void {
         self.importer.deinit();
         self.importer_ready = false;
     }
+    // 本地 RenderingDevice **释放不了**：gdzig 的绑定里没有 `free_rendering_device`
+    //（Godot 文档要求用它销毁本地设备），而 RenderingDevice 的基类是 `Object` 而不是
+    // `RefCounted`，所以也没法走 `unreference()`。实测它因此固定在退出时的泄漏清单里
+    // 占一条（`Leaked instance: RenderingDevice:…`）。这是绑定缺口，记在 0022 文档里；
+    // 正式代码不用本地设备（只有自检用），所以影响限于测试进程。
+    self.local_rd = null;
     if (self.luma) |b| {
         self.allocator.free(b);
         self.luma = null;
