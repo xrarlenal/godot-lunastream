@@ -1,0 +1,63 @@
+// NV12 / 右对齐 16 位半平面 → RGBA。软解与硬解两条路共用这一份。
+//
+// 设计上刻意**不含任何数值常数**：归一化（减黑电平/减中性点、乘满量程倒数）与
+// YCbCr→RGB 的四个系数全部从推送常量进来，而那些常数由 core 的色彩层算出来
+// （core/push_constants.zig，数学只在 core/color.zig 里定义一次）。
+//
+// 这样做的代价是推送常量稍大（48 字节），收益是"CPU 与 GPU 的数学不会各自漂移"——
+// 源工程曾专门写测试解析着色器源码、比对手抄的常数，这里从结构上就不需要那种测试。
+//
+// 推送常量的字段顺序与大小由 src/shaders/nv12_shader_abi_test.zig 对着本文件的
+// push_constant 块守着，改任何一边都会红。
+
+#[compute]
+#version 450
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+layout(set = 0, binding = 0) uniform sampler2D luma_tex;
+layout(set = 0, binding = 1) uniform sampler2D chroma_tex;
+layout(set = 0, binding = 2, rgba8) uniform image2D out_image;
+
+layout(push_constant, std430) uniform Params {
+	// 码值 = 纹理样值 * sample_scale。8 位是 255，10 位是 65535；
+	// 左对齐的容器（P010 / x420）还要再除以 2^shift，所以这里直接给"除完"的值。
+	float sample_scale;
+	// 归一化：归一值 = (码值 - offset) * gain（见 core/color.zig 的 Affine）。
+	float luma_offset;
+	float luma_gain;
+	float chroma_offset;
+	float chroma_gain;
+	// YCbCr → RGB 的四个系数（与 core/color.zig 的 Coefficients 同名同义）。
+	float r_cr;
+	float g_cb;
+	float g_cr;
+	float b_cb;
+	// 补到 48 字节（推送常量大小必须是 16 的倍数）。
+	float pad0;
+	float pad1;
+	float pad2;
+} params;
+
+void main() {
+	const ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
+	const vec2 size = vec2(imageSize(out_image));
+	if (pos.x >= int(size.x) || pos.y >= int(size.y)) return;
+
+	// 采样点取像素中心：半分辨率色度平面的双线性采样因此落在正确位置。
+	const vec2 uv = (vec2(pos) + 0.5) / size;
+
+	const float y_code = texture(luma_tex, uv).r * params.sample_scale;
+	const vec2 cbcr = texture(chroma_tex, uv).rg * params.sample_scale;
+
+	const float y = (y_code - params.luma_offset) * params.luma_gain;
+	const float cb = (cbcr.x - params.chroma_offset) * params.chroma_gain;
+	const float cr = (cbcr.y - params.chroma_offset) * params.chroma_gain;
+
+	const vec3 rgb = vec3(
+		y + params.r_cr * cr,
+		y + params.g_cb * cb + params.g_cr * cr,
+		y + params.b_cb * cb);
+
+	imageStore(out_image, pos, vec4(clamp(rgb, vec3(0.0), vec3(1.0)), 1.0));
+}

@@ -21,6 +21,7 @@ pub const decode_scheduler = @import("decode_scheduler.zig");
 pub const playback_state = @import("playback_state.zig");
 pub const backend_selector = @import("backend_selector.zig");
 pub const texture_pool = @import("texture_pool.zig");
+pub const push_constants = @import("push_constants.zig");
 
 test "core 模块可以编译并被引用" {
     try std.testing.expect(version.len > 0);
