@@ -185,3 +185,12 @@ ERROR: Failed to retrieve non-existent singleton 'ResourceLoader'.
 下一步要做的事：照源工程那样实现按级别的生命周期钩子，把加载器挂在
 `SERVERS` 级（`ResourceLoader` 单例那时已经存在），再在自检里加一条
 `ResourceLoader.exists("res://clip.mp4")` + `load()` 类型断言。
+- **重连已接线**（0019）：状态机的退避窗口到期后，播放实现调调度器的
+  `requestReopen`，由**持有租约的 worker**在自己的租约里执行 `close + open`——
+  主线程绝不直接碰后端（会与正在解码的 worker 抢同一份 FFmpeg 上下文）。
+  调度器侧有 3 项单测（登记即执行、清 eos、连续重开只保留最后一份路径副本）。
+
+  **暴露出来、还没做的一件事**：重开之后源的 PTS 会从头开始，于是 core 的单调性
+  守卫会告警（实测：`0.0000s 出现在 0.0667s 之后`），而 0001 里那个专为这件事写的
+  `MediaClock.reanchor`（只向前、不跳回旧帧）**还没接进播放链路**——现在播放实现
+  直接拿帧的 PTS 当播放位置，没有时钟。接上时钟 + 重连后 reanchor 是下一步。

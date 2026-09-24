@@ -102,6 +102,12 @@ pub const DecodeStream = struct {
     /// 只由当前持有该流的生产者路径触碰（每路串行），所以不需要同步。
     last_enqueued_pts: ?f64 = null,
     pts_regressed_warned: bool = false,
+
+    /// 断流重连的请求（0019）。调用者（主线程）只登记，**真正的 open 由持有租约的
+    /// 线程在 `pumpStream` 里执行**——后端只允许一个线程触碰（每路流串行的契约）。
+    reopen_requested: bool = false,
+    /// 请求重开时用的路径副本（调度器拥有；注销与重开完成后释放）。
+    reopen_path: ?[]u8 = null,
 };
 
 pub const StreamHandle = *DecodeStream;
@@ -287,8 +293,11 @@ pub const DecodeScheduler = struct {
     // ------------------------------------------------------------------
 
     fn releaseStreamResources(self: *DecodeScheduler, stream: StreamHandle) void {
-        _ = self;
         while (stream.queue.pop()) |f| f.release();
+        if (stream.reopen_path) |path| {
+            self.allocator.free(path);
+            stream.reopen_path = null;
+        }
         if (stream.backend) |b| {
             b.close();
             b.deinit();
@@ -316,6 +325,42 @@ pub const DecodeScheduler = struct {
         self.mu.unlock();
         self.cv.broadcast();
         if (wake) self.cv.signal();
+    }
+
+    /// 请求重开这一路源（断流重连，0019）。
+    ///
+    /// **谁执行很关键**：调用方通常是主线程（状态机的退避窗口到期），而后端只允许
+    /// 持有租约的那一个线程触碰（每路流串行的契约）。所以这里只做两件事——登记一份
+    /// 路径副本、重置结束标记——真正的 `close + open` 由 `pumpStream` 在自己的租约里做。
+    ///
+    /// 这样也避免了"主线程调 open 时 worker 正在解码同一个 FFmpeg 上下文"的竞争。
+    pub fn requestReopen(self: *DecodeScheduler, stream: StreamHandle, path: []const u8) !void {
+        const copy = try self.allocator.dupe(u8, path);
+        {
+            self.mu.lock();
+            if (stream.reopen_path) |old| self.allocator.free(old);
+            stream.reopen_path = copy;
+            stream.reopen_requested = true;
+            // 重开之后要重新开始消费：结束标记清掉、需求重新点亮。后者不只是语义
+            // 上的：`notify` 只在"这条流想要更多"时才会泵一轮，而 EOS 之后
+            // wants_more 早就落下了——不点亮它，重开请求会一直躺在那里没人执行
+            // （实测：测试里 closes/opens 都是 0）。
+            stream.eos = false;
+            stream.wants_more = true;
+            self.mu.unlock();
+        }
+        self.notify(stream);
+    }
+
+    /// 取出待执行的重开请求（由持有租约的线程调用）。返回的切片归调用方释放。
+    fn takeReopenRequest(self: *DecodeScheduler, stream: StreamHandle) ?[]u8 {
+        self.mu.lock();
+        defer self.mu.unlock();
+        if (!stream.reopen_requested) return null;
+        const path = stream.reopen_path orelse return null;
+        stream.reopen_requested = false;
+        stream.reopen_path = null;
+        return path;
     }
 
     /// 标记某路流需要预读，并唤醒一个 worker（异步）或就地泵一轮（同步）。
@@ -427,6 +472,15 @@ pub const DecodeScheduler = struct {
     /// 也是它后端的唯一触碰者。
     fn pumpStream(self: *DecodeScheduler, stream: StreamHandle) void {
         const backend = if (stream.backend) |*b| b else return;
+
+        // 断流重连（0019）：请求由主线程登记，执行在这里——持有租约的线程。
+        if (self.takeReopenRequest(stream)) |path| {
+            defer self.allocator.free(path);
+            backend.close();
+            // 开不回来就什么都不做：下一次 tick 仍会请求重连（状态机自己会退避），
+            // 而 eos 已经被 requestReopen 清掉，队列也不会被当成"流到头了"。
+            _ = backend.open(path);
+        }
 
         while (!stream.queue.full()) {
             // 热路径上免锁读一次写一次的 dead 标志（acquire 与注销里的

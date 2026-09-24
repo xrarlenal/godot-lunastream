@@ -93,6 +93,8 @@ last_reported_state: playback_state.State = .off,
 reconnects: u64 = 0,
 stalls: u64 = 0,
 last_stats_ms: i64 = 0,
+/// 打开时用的路径副本（重连要用；调度器会再复制一份自己保管）。
+path_copy: ?[]u8 = null,
 
 // ---------------------------------------------------------------------------
 // 注册与生命周期（与 0003 / 0022 的写法一致）
@@ -167,6 +169,8 @@ pub fn load(self: *LunaVideoStreamPlayback, path: []const u8) bool {
     }
     self.backend_open = true;
     self.length_seconds = backend.durationSeconds();
+    if (self.path_copy) |old| self.allocator.free(old);
+    self.path_copy = self.allocator.dupe(u8, path) catch null;
     self.machine = StateMachine.init(.{});
     self.machine.beginOpen(nowMs());
     self.reportState();
@@ -244,6 +248,10 @@ fn teardown(self: *LunaVideoStreamPlayback) void {
     if (self.backend_open) {
         self.backend.deinit();
         self.backend_open = false;
+    }
+    if (self.path_copy) |path| {
+        self.allocator.free(path);
+        self.path_copy = null;
     }
     self.frames_presented = 0;
     self.position_seconds = 0.0;
@@ -404,14 +412,13 @@ fn setStat(stats: *Dictionary, key: []const u8, value: f64) void {
 /// 重新打开这一路源。状态机在退避窗口到期时才请求重连，所以这里不做等待。
 fn tryReconnect(self: *LunaVideoStreamPlayback) void {
     self.reconnects += 1;
-    // **刻意只计数，不在这里真的重开**：解锁重开会跨线程——后端由调度器的 worker
-    // 线程使用（0007 的"每路流串行"契约），而 _update 在主线程上；从主线程直接
-    // 调 backend.open 会与正在解码的 worker 抢同一份 FFmpeg 上下文。
-    //
-    // 正确做法是给调度器加一个"重开请求"入口，由 worker 在自己的租约里执行。
-    // 在那之前：状态机（core/playback_state.zig，0008 已有单测）仍然如实降级为
-    // stalled/failed 并发信号，使用者至少不会再看到"画面停了但状态还说在播"。
-    // 这条限制写在功能文档里。
+    // 真正的重开交给调度器：它登记请求，由**持有租约的 worker**在自己的租约里执行
+    // close + open（见 core/decode_scheduler.zig 的 requestReopen）。主线程绝不直接
+    // 碰后端——那会与正在解码的 worker 抢同一份 FFmpeg 上下文。
+    const scheduler = self.scheduler orelse return;
+    const stream = self.stream orelse return;
+    const path = self.path_copy orelse return;
+    scheduler.requestReopen(stream, path) catch {};
 }
 
 fn nowMs() i64 {

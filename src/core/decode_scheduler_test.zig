@@ -24,6 +24,9 @@ const FakeBackend = struct {
     emitted: i32 = 0,
     closed: bool = false,
     freed: bool = false,
+    /// 重连用例要看"后端到底被开过/关过几次"。
+    opens: i32 = 0,
+    closes: i32 = 0,
 
     /// 每次 `next_video_frame` 的进入/离开并发计数。每路流串行的话，
     /// 最大值必须恒为 1。
@@ -38,12 +41,18 @@ const FakeBackend = struct {
         _ = counter.fetchAdd(1, .monotonic);
     }
 
-    fn open(_: *anyopaque, url: []const u8) bool {
+    fn open(p: *anyopaque, url: []const u8) bool {
+        const self: *@This() = @ptrCast(@alignCast(p));
+        self.opens += 1;
+        // 真实后端重开之后是从头开始的一路流，所以计数器也要归零——否则
+        // "重开能不能重新出帧"这件事在假后端上根本测不出来。
+        self.emitted = 0;
         return url.len > 0;
     }
     fn close(p: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(p));
         self.closed = true;
+        self.closes += 1;
     }
     fn deinit(p: *anyopaque) void {
         const self: *@This() = @ptrCast(@alignCast(p));
@@ -306,4 +315,63 @@ test "入队单调性守卫：PTS 回退时置位一次性告警闩锁" {
     sched_mod.checkEnqueueMonotonic(&stream, 1.1);
     try testing.expect(stream.pts_regressed_warned);
     try testing.expectEqual(@as(f64, 1.1), stream.last_enqueued_pts.?);
+}
+
+// ---------------------------------------------------------------------------
+// 0019：断流重连的"重开请求"
+// ---------------------------------------------------------------------------
+
+test "重开请求登记后，由持有租约的线程执行 close + open（同步模式可确定性验证）" {
+    // 同步模式：执行者就是调用线程，测试因此没有时序不确定性。
+    const sched = try DecodeScheduler.init(testing.allocator, 1, true);
+    defer sched.deinit();
+
+    var fake: FakeBackend = .{ .total_frames = 3 };
+    const stream = try sched.registerStream(fake.backend());
+    // 注册**不**负责开源：按契约，调用方先 open 再把已经开好的后端交给调度器
+    //（播放实现就是这么做的）。所以此时 opens 仍是 0。
+    try testing.expectEqual(@as(i32, 0), fake.opens);
+
+    // 先把三帧取干净：队列空且后端 EOS。
+    var taken: i32 = 0;
+    while (sched.nextFrame(stream)) |frame| {
+        frame.release();
+        taken += 1;
+    }
+    try testing.expectEqual(@as(i32, 3), taken);
+
+    // 请求重开：同步模式下它会就地泵一轮，于是后端应当看到一次 close + 一次 open。
+    try sched.requestReopen(stream, "rtsp://camera/again");
+    try testing.expectEqual(@as(i32, 1), fake.closes);
+    try testing.expectEqual(@as(i32, 1), fake.opens);
+}
+
+test "重开请求会清掉 eos（否则队列空了会被当成流到头）" {
+    const sched = try DecodeScheduler.init(testing.allocator, 1, true);
+    defer sched.deinit();
+
+    // 重开之后假后端会从头再吐一遍（open 里把 emitted 归零），所以这里给两帧，
+    // 才能验到"重开后队列里又有东西、不再被判成流到头"。
+    var fake: FakeBackend = .{ .total_frames = 2 };
+    const stream = try sched.registerStream(fake.backend());
+    // 把这两帧取干净 → 应当处于 EOS。
+    while (sched.nextFrame(stream)) |frame| frame.release();
+    try testing.expect(sched.atEnd(stream));
+
+    try sched.requestReopen(stream, "udp://127.0.0.1:1234");
+    try testing.expect(!sched.atEnd(stream));
+}
+
+test "连续重开只保留最后一次的路径（不泄漏前一次的副本）" {
+    const sched = try DecodeScheduler.init(testing.allocator, 1, true);
+    defer sched.deinit();
+
+    var fake: FakeBackend = .{ .total_frames = 1 };
+    const stream = try sched.registerStream(fake.backend());
+    try sched.requestReopen(stream, "rtsp://first");
+    try sched.requestReopen(stream, "rtsp://second");
+    // 两次都执行过（同步模式下每次 requestReopen 都会泵一轮）。
+    try testing.expectEqual(@as(i32, 2), fake.opens);
+    try testing.expectEqual(@as(i32, 2), fake.closes);
+    // 用测试分配器：泄漏一处都会被 testing.allocator 在结束时抓到。
 }
