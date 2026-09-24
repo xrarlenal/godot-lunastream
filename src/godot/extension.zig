@@ -10,11 +10,14 @@ const godot = @import("godot");
 const Registry = godot.extension.Registry;
 
 const LunaVideoStream = @import("luna_video_stream.zig");
+const LunaSelfTest = @import("luna_self_test.zig");
 
 pub fn register(r: *Registry) void {
     r.addModule(LunaVideoStream);
+    r.addModule(LunaSelfTest);
 }
 
 pub fn unregister(r: *Registry) void {
+    r.removeModule(LunaSelfTest);
     r.removeModule(LunaVideoStream);
 }

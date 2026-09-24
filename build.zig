@@ -250,4 +250,24 @@ pub fn build(b: *Build) !void {
 
     const extension_step = b.step("extension", "构建 GDExtension 并安装进示例工程");
     extension_step.dependOn(&install.step);
+
+    // --- 引擎侧自检：呈现层（CPU 导入器 + 纹理池） ---
+    //
+    // 需要**带渲染上下文**的 Godot：headless 下连 RenderingDevice 都没有，而这一步
+    // 要真的创建纹理、上传、回读比对。所以它不加 --headless，会短暂开一个窗口。
+    // 加 --quit-after 只是保底：脚本自己会 quit，万一脚本崩了就靠这个上限收场
+    //（之前 GDScript 解析失败过一次，进程就那么一直挂着）。
+    const godot_bin = opt_godot_path orelse "/Applications/Godot.app/Contents/MacOS/Godot";
+    const importer_step = b.step("godot-importer-selftest", "引擎侧 CPU 导入器自检（需要带渲染上下文的 Godot）");
+    const run_importer = b.addSystemCommand(&.{
+        godot_bin,
+        "--path",
+        "example/gdextension-smoke",
+        "--quit-after",
+        "600",
+        "res://importer_smoke.tscn",
+    });
+    run_importer.stdio = .inherit;
+    run_importer.step.dependOn(&install.step);
+    importer_step.dependOn(&run_importer.step);
 }
