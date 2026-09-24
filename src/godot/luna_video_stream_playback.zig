@@ -102,6 +102,12 @@ path_copy: ?[]u8 = null,
 /// "切片连续"在重连时也成立——播放位置不会突然跳回 0。
 clock: MediaClock = MediaClock.init(0.0),
 
+/// 输出档位（0023 的接线）：0 = SDR（默认，直通），1 = HDR（按帧的传输函数做
+/// PQ/HLG 到 SDR 的色调映射）。
+output_mode: i64 = 0,
+/// HDR 色调映射参数。默认峰值 = 白点 = 1000 nits（峰值压到白、中低亮度不额外抬升）。
+tone: core.hdr.ToneMap = .{ .peak_nits = 1000.0, .white_nits = 1000.0 },
+
 // ---------------------------------------------------------------------------
 // 注册与生命周期（与 0003 / 0022 的写法一致）
 // ---------------------------------------------------------------------------
@@ -357,12 +363,22 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
     defer surface.release();
 
     const pipeline = if (self.present) |*p| p else return;
-    const pc = PushConstants.fromColorimetry(
+    var pc = PushConstants.fromColorimetry(
         if (frame.cpu.bit_depth >= 10) 10 else 8,
         frame.color.matrix,
         frame.color.range,
         @intCast(surface.raw_code_shift),
     );
+    if (self.output_mode == 1) {
+        // HDR 档：按帧自报的传输函数选 PQ / HLG（未指定时按 HDR10 的 PQ），原色是
+        // BT.2020 时在线性光里换算。数学在 core/hdr.zig，着色器只执行推送常量。
+        const mode: core.push_constants.HdrMode = switch (frame.color.transfer) {
+            .hlg => .hlg,
+            else => .pq,
+        };
+        const gamut: core.push_constants.Gamut = if (frame.color.primaries == .bt2020) .bt2020 else .bt709;
+        pc = PushConstants.withHdr(pc, mode, gamut, self.tone);
+    }
     const output = pipeline.present(surface, pc) catch return;
     // 分辨率变化会让呈现管线重建输出纹理（RID 变），所以每次对齐一次——
     // setTextureRdRid 很轻，而漏了这一步的表现是"换了分辨率之后画面不再更新"。

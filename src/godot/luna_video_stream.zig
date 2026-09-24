@@ -82,6 +82,9 @@ pub fn register(r: *Registry) void {
     class.addMethod("get_reconnect_max_attempts", .auto);
     class.addMethod("set_reconnect_backoff_max_ms", .auto);
     class.addMethod("get_reconnect_backoff_max_ms", .auto);
+    // 0023 的接线：输出档位（SDR 默认；HDR 时按帧的传输函数做 PQ/HLG → SDR 的映射）。
+    class.addMethod("set_output_mode", .auto);
+    class.addMethod("get_output_mode", .auto);
     // 信号的名字来自**结构体名**（gdzig 用 casez 的 signal 规则转换），字段就是参数。
     class.addSignal(StateChanged);
     class.addSignal(FrameReady);
@@ -178,6 +181,17 @@ pub fn setReconnectBackoffMaxMs(self: *LunaVideoStream, ms: i64) void {
 pub fn getReconnectBackoffMaxMs(self: *LunaVideoStream) i64 {
     if (self.last_playback) |playback| return playback.machine.policy.backoff_max_ms;
     return 8000;
+}
+
+/// 0 = SDR（默认），1 = HDR。非法值被忽略（保持上一个合法值）。
+pub fn setOutputMode(self: *LunaVideoStream, mode: i64) void {
+    if (mode != 0 and mode != 1) return;
+    if (self.last_playback) |playback| playback.output_mode = mode;
+}
+
+pub fn getOutputMode(self: *LunaVideoStream) i64 {
+    if (self.last_playback) |playback| return playback.output_mode;
+    return 0;
 }
 
 /// 最近一路流已经呈现的帧数；没有播放实例时是 0。

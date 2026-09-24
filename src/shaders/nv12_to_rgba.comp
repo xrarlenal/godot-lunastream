@@ -1,44 +1,85 @@
 #version 450
-layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
-// NV12 / 右对齐 16 位半平面 → RGBA。软解与硬解两条路共用这一份。
+// NV12 / 右对齐 16 位半平面 → RGBA（SDR 与 HDR 两条路共用这一份）。
 //
-// 设计上刻意不含任何数值常数：归一化与 YCbCr→RGB 的四个系数全部从推送常量进来，
-// 而那些常数由 core 的色彩层算出来（core/push_constants.zig，数学只在
-// core/color.zig 里定义一次）。代价是推送常量稍大（48 字节），收益是 CPU 与 GPU
-// 的数学不会各自漂移。
+// 数学来源：SDR 的归一化与矩阵来自 core/color.zig；HDR 的传输函数、色调映射与
+// BT.2020→BT.709 来自 core/hdr.zig。那边是唯一定义，这里只是把同一套式子写成 GLSL。
 //
-// **不要在这里写 `#[compute]`**：那是 Godot 的 Shader 资源（GDShader）那套的写法，
-// 而 `RenderingDevice.shaderCompileSpirvFromSource` 会把源码**原样**交给 glslang，
-// glslang 不认这个标记，于是只会得到一句没头没尾的
-// "Can't create a shader from an errored bytecode"（这一版被它绊了一整轮）。
-// 本机有 glslangValidator，用它复核最快：
-//   tail -n +1 src/shaders/nv12_to_rgba.comp > /tmp/x.comp
-//   glslangValidator -V --target-env vulkan1.1 /tmp/x.comp
+// 两条路由推送常量 `hdr_mode` 选择：0 = SDR 直通，1 = PQ，2 = HLG。SDR 路径与以前
+// 完全一致（回归风险最低）；HDR 路径多走：
+//   电信号 → 线性光 → 广色域换算 → 色调映射到 SDR → BT.709 OETF 编码。
+//
+// **不要写 #[compute]**：RDShaderSource 会把源码原样交给 glslang，glslang 不认这个
+// 标记（那是 Godot 的 Shader 资源那套），只会得到一句 "Can't create a shader from an
+// errored bytecode"。本机有 glslangValidator，复核命令见 0018 的功能文档。
+
+layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
 layout(set = 0, binding = 0) uniform sampler2D luma_tex;
 layout(set = 0, binding = 1) uniform sampler2D chroma_tex;
 layout(set = 0, binding = 2, rgba8) uniform image2D out_image;
 
 layout(push_constant, std430) uniform Params {
-	// 码值 = 纹理样值 * sample_scale。8 位是 255，10 位是 65535；
-	// 左对齐的容器（P010 / x420）还要再除以 2^shift，所以这里直接给"除完"的值。
 	float sample_scale;
-	// 归一化：归一值 = (码值 - offset) * gain（见 core/color.zig 的 Affine）。
 	float luma_offset;
 	float luma_gain;
 	float chroma_offset;
 	float chroma_gain;
-	// YCbCr → RGB 的四个系数（与 core/color.zig 的 Coefficients 同名同义）。
 	float r_cr;
 	float g_cb;
 	float g_cr;
 	float b_cb;
-	// 补到 48 字节（推送常量大小必须是 16 的倍数）。
+	float hdr_mode;
+	float gamut;
+	float tone_peak_nits;
+	float tone_white_nits;
 	float pad0;
 	float pad1;
 	float pad2;
 } params;
+
+// --- PQ（SMPTE ST 2084）：常数照 core/hdr.zig 写成有理数 -------------------
+const float PQ_M1 = 2610.0 / 16384.0;
+const float PQ_M2 = 2523.0 / 4096.0 * 128.0;
+const float PQ_C1 = 3424.0 / 4096.0;
+const float PQ_C2 = 2413.0 / 4096.0 * 32.0;
+const float PQ_C3 = 2392.0 / 4096.0 * 32.0;
+
+float pqToRelativeLuminance(float e) {
+	if (e <= 0.0) return 0.0;
+	float p = pow(e, 1.0 / PQ_M2);
+	float num = max(p - PQ_C1, 0.0);
+	float den = PQ_C2 - PQ_C3 * p;
+	if (den <= 0.0) return 1.0;
+	return pow(num / den, 1.0 / PQ_M1);
+}
+
+// --- HLG（BT.2100）：电信号 → 场景线性（不含 OOTF，同 core/hdr.zig） -------
+const float HLG_A = 0.17883277;
+const float HLG_B = 1.0 - 4.0 * HLG_A;
+const float HLG_C = 0.5 - HLG_A * log(4.0 * HLG_A);
+
+float hlgToSceneLinear(float e) {
+	if (e <= 0.0) return 0.0;
+	if (e <= 0.5) return e * e / 3.0;
+	return (exp((e - HLG_C) / HLG_A) + HLG_B) / 12.0;
+}
+
+// --- BT.709 的 OETF（线性光 → 电信号） ------------------------------------
+float linearToBt709(float l) {
+	if (l <= 0.0) return 0.0;
+	if (l < 0.018) return 4.5 * l;
+	return 1.099 * pow(l, 0.45) - 0.099;
+}
+
+// --- 扩展 Reinhard 色调映射（与 core/hdr.zig 的 ToneMap 同一形态） --------
+float toneMap(float luminance_nits, float peak, float white) {
+	if (luminance_nits <= 0.0 || peak <= 0.0 || white <= 0.0) return 0.0;
+	float x = luminance_nits / peak;
+	float w = white / peak;
+	float outv = (x * (1.0 + x / (w * w))) / (1.0 + x);
+	return min(outv, 1.0);
+}
 
 void main() {
 	const ivec2 pos = ivec2(gl_GlobalInvocationID.xy);
@@ -55,10 +96,35 @@ void main() {
 	const float cb = (cbcr.x - params.chroma_offset) * params.chroma_gain;
 	const float cr = (cbcr.y - params.chroma_offset) * params.chroma_gain;
 
-	const vec3 rgb = vec3(
+	// SDR：YCbCr → R'G'B' 就完了（Y'CbCr 本身就是编码后的信号）。
+	vec3 encoded = vec3(
 		y + params.r_cr * cr,
 		y + params.g_cb * cb + params.g_cr * cr,
 		y + params.b_cb * cb);
 
-	imageStore(out_image, pos, vec4(clamp(rgb, vec3(0.0), vec3(1.0)), 1.0));
+	if (params.hdr_mode > 0.5) {
+		// 1) 电信号 → 线性光。PQ 给相对亮度（1 = 10000 nits）；HLG 给场景线性光
+		//    （BT.2100 的标称峰值按 1000 nits 计）。
+		vec3 linear = (params.hdr_mode < 1.5)
+			? vec3(pqToRelativeLuminance(encoded.r), pqToRelativeLuminance(encoded.g), pqToRelativeLuminance(encoded.b))
+			: vec3(hlgToSceneLinear(encoded.r), hlgToSceneLinear(encoded.g), hlgToSceneLinear(encoded.b));
+		const float nits_scale = (params.hdr_mode < 1.5) ? 10000.0 : 1000.0;
+
+		// 2) 广色域 → BT.709，在线性光里做（矩阵行和为 1，白点不变）。
+		if (params.gamut > 0.5) {
+			linear = max(vec3(
+				dot(vec3(1.6605, -0.5876, -0.0728), linear),
+				dot(vec3(-0.1246, 1.1329, -0.0083), linear),
+				dot(vec3(-0.0182, -0.1006, 1.1187), linear)), vec3(0.0));
+		}
+
+		// 3) 色调映射到 SDR 的 [0,1]，再按 BT.709 的 OETF 编码回去。
+		const vec3 nits = linear * nits_scale;
+		encoded = vec3(
+			linearToBt709(toneMap(nits.r, params.tone_peak_nits, params.tone_white_nits)),
+			linearToBt709(toneMap(nits.g, params.tone_peak_nits, params.tone_white_nits)),
+			linearToBt709(toneMap(nits.b, params.tone_peak_nits, params.tone_white_nits)));
+	}
+
+	imageStore(out_image, pos, vec4(clamp(encoded, vec3(0.0), vec3(1.0)), 1.0));
 }

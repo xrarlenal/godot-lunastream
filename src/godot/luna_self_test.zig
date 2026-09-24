@@ -133,6 +133,11 @@ have_present_surface: bool = false,
 present_luma: ?[]u8 = null,
 present_chroma: ?[]u8 = null,
 present_spec: Spec = .{ .width = 32, .height = 24, .bit_depth = 8 },
+/// 0023：HDR 用例独立一套管线与帧，免得干扰上面 SDR 那条逐像素回读。
+hdr_pipeline: ?PresentPipeline = null,
+hdr_surface: Surface = undefined,
+have_hdr_surface: bool = false,
+hdr_luma_code: u8 = 128,
 
 pub fn register(r: *Registry) void {
     const class = r.createClass(LunaSelfTest, r.allocator, .auto);
@@ -540,6 +545,52 @@ fn checkPresentPipeline(self: *LunaSelfTest, report: *Report) void {
     // 少了这一步，回读拿到的是新尺寸那帧，已有的那条亮度比对会因为"画面完全变了"而红
     //（实测：最大偏差 98/255）。
     _ = pipeline.present(self.present_surface, pc) catch {};
+
+    // --- 0023：HDR 档。用一条**独立**的小管线，避免影响上面 SDR 那条回读。
+    // 输入是"亮度 128 + 中性色度"（即一段 PQ 编码的中灰），预期输出由 core/hdr.zig
+    // 算出来（与着色器同一套式子）。
+    const hdr_spec: Spec = .{ .width = 16, .height = 16, .bit_depth = 8 };
+    const hdr_luma = self.allocator.alloc(u8, hdr_spec.lumaBytes()) catch return;
+    const hdr_chroma = self.allocator.alloc(u8, hdr_spec.chromaBytes()) catch return;
+    defer {
+        self.allocator.free(hdr_luma);
+        self.allocator.free(hdr_chroma);
+    }
+    @memset(hdr_luma, self.hdr_luma_code);
+    @memset(hdr_chroma, 128);
+    const hdr_planes: CpuPlanes = .{
+        .y = hdr_luma.ptr,
+        .uv = hdr_chroma.ptr,
+        .y_stride = hdr_spec.lumaRowBytes(),
+        .uv_stride = hdr_spec.chromaRowBytes(),
+        .bit_depth = 8,
+    };
+    self.hdr_surface = self.importer.import(hdr_spec, hdr_planes) catch |err| {
+        report.add(false, "HDR 用例：导入（{s}）", .{@errorName(err)});
+        return;
+    };
+    self.have_hdr_surface = true;
+    self.hdr_pipeline = PresentPipeline.init(
+        self.allocator,
+        self.importer.rd,
+        hdr_spec.width,
+        hdr_spec.height,
+        .{ .enable_readback = true },
+    ) catch |err| {
+        report.add(false, "HDR 用例：建管线（{s}）", .{@errorName(err)});
+        return;
+    };
+    const hdr_pc = core.push_constants.Nv12PushConstants.withHdr(
+        core.push_constants.Nv12PushConstants.fromColorimetry(8, .bt709, .video, 0),
+        .pq,
+        .bt709,
+        .{ .peak_nits = 1000.0, .white_nits = 1000.0 },
+    );
+    _ = self.hdr_pipeline.?.present(self.hdr_surface, hdr_pc) catch |err| {
+        report.add(false, "HDR 用例：present（{s}）", .{@errorName(err)});
+        return;
+    };
+    report.add(true, "HDR 档（PQ）的呈现没有报错", .{});
 }
 
 /// 把呈现输出读回来，与 core 的色彩层算出的期望值逐像素比对（必须在下一帧做，
@@ -609,6 +660,78 @@ fn verifyPresentOutput(self: *LunaSelfTest, report: *Report) void {
 
     report.add(gray_ok, "每个像素都是中性灰（色度 128 在整条管线上不偏色）", .{});
     report.add(worst <= 2, "逐像素亮度与 core 色彩层的期望值一致（最大偏差 {d}/255，容差 2）", .{worst});
+}
+
+/// 0023：读回 HDR 档的输出，与 core/hdr.zig 算出的期望值逐像素比对。
+///
+/// 输入是"PQ 编码的中灰"（亮度 128、色度中性）：中性色度让 4:2:0 的双线性上采样不
+/// 引入不确定性，于是每个像素的期望值都能精确算出来——而这条链路正是 0023 的全部
+/// （PQ EOTF → 色调映射 → BT.709 OETF），所以它同时是"着色器与 core 的数学一致"的证据。
+fn verifyHdrOutput(self: *LunaSelfTest, report: *Report) void {
+    const pipeline = self.hdr_pipeline orelse return;
+    const rd = pipeline.rd;
+    const width: u32 = 16;
+    const height: u32 = 16;
+    const pixels = @as(usize, width) * height;
+    const want_bytes = pixels * 4;
+
+    const staging = createStagingTexture(rd, width, height, .data_format_r8g8b8a8_unorm);
+    defer if (rd.textureIsValid(staging)) rd.freeRid(staging);
+
+    rd.submit();
+    rd.sync();
+    const copied = rd.textureCopy(
+        pipeline.outputTexture(),
+        staging,
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = @floatFromInt(width), .y = @floatFromInt(height), .z = 1 },
+        0,
+        0,
+        0,
+        0,
+    ) == .ok;
+    report.add(copied, "HDR 用例：把输出拷进暂存纹理", .{});
+
+    rd.submit();
+    rd.sync();
+    var rgba = rd.textureGetData(staging, 0);
+    defer rgba.deinit();
+    report.add(
+        rgba.size() == @as(i64, @intCast(want_bytes)),
+        "HDR 用例：回读字节数 == 宽 x 高 x 4（实际 {d}）",
+        .{rgba.size()},
+    );
+    if (rgba.size() != @as(i64, @intCast(want_bytes))) return;
+
+    // core 侧算同一个像素：与着色器用同一套式子（这正是要验证的事）。
+    const code: f64 = @floatFromInt(self.hdr_luma_code);
+    const y_norm = core.color.normalizeLuma(code, .right_justified_8, .video);
+    const relative = core.hdr.pq.toRelativeLuminance(y_norm);
+    const nits = relative * 10000.0;
+    const tone: core.hdr.ToneMap = .{ .peak_nits = 1000.0, .white_nits = 1000.0 };
+    const mapped = tone.apply(nits);
+    const encoded = core.hdr.linearToBt709(mapped);
+    const want: u32 = @intFromFloat(@round(std.math.clamp(encoded, 0.0, 1.0) * 255.0));
+
+    const base: [*]const u8 = @ptrFromInt(@intFromPtr(rgba.indexConst(0)));
+    var gray_ok = true;
+    var worst: u32 = 0;
+    var i: usize = 0;
+    while (i < pixels) : (i += 1) {
+        const r = base[i * 4];
+        const g = base[i * 4 + 1];
+        const b = base[i * 4 + 2];
+        if (r != g or g != b) gray_ok = false;
+        const got: u32 = r;
+        const diff = if (got > want) got - want else want - got;
+        if (diff > worst) worst = diff;
+    }
+    report.note("HDR：输入码值 {d} → core 期望 {d}/255", .{ self.hdr_luma_code, want });
+    report.add(gray_ok, "HDR 档：中性色度仍是中性灰（色调映射没引入偏色）", .{});
+    report.add(worst <= 3, "HDR 档：逐像素输出与 core/hdr.zig 的期望一致（最大偏差 {d}/255，容差 3）", .{
+        worst,
+    });
 }
 
 /// Metal 零拷贝（0015）：自己造一块 IOSurface 支撑的 CVPixelBuffer 喂进分发器。
@@ -771,6 +894,7 @@ pub fn verify(self: *LunaSelfTest) String {
     }
 
     if (self.have_present_surface) verifyPresentOutput(self, &report);
+    if (self.have_hdr_surface) verifyHdrOutput(self, &report);
 
     report.note("第一阶段创建纹理 {d} 块、上传平面 {d} 次、孤儿 {d} 块", .{
         self.importer.stats().created,
@@ -840,6 +964,14 @@ fn verifyMetalSurface(self: *LunaSelfTest, report: *Report, y_want: []const u8) 
 }
 
 fn teardown(self: *LunaSelfTest) void {
+    if (self.hdr_pipeline) |*pipeline| {
+        pipeline.deinit();
+        self.hdr_pipeline = null;
+    }
+    if (self.have_hdr_surface) {
+        self.hdr_surface.release();
+        self.have_hdr_surface = false;
+    }
     if (self.present) |*pipeline| {
         pipeline.deinit();
         self.present = null;

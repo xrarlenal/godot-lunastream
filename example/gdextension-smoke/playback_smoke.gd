@@ -103,6 +103,13 @@ func _ready() -> void:
 	_check("重连次数上限可读回", int(_stream.call("get_reconnect_max_attempts")) == 3, str(_stream.call("get_reconnect_max_attempts")))
 	_check("退避封顶可读回", int(_stream.call("get_reconnect_backoff_max_ms")) == 4321, str(_stream.call("get_reconnect_backoff_max_ms")))
 
+	# 0023：输出档位（SDR 默认；HDR 时按帧的传输函数做色调映射，数学在 core/hdr.zig）。
+	_check("默认是 SDR 档", int(_stream.call("get_output_mode")) == 0, str(_stream.call("get_output_mode")))
+	_stream.call("set_output_mode", 1)
+	_check("切到 HDR 档可读回", int(_stream.call("get_output_mode")) == 1, str(_stream.call("get_output_mode")))
+	_stream.call("set_output_mode", 0)
+	_check("切回 SDR 档可读回", int(_stream.call("get_output_mode")) == 0, str(_stream.call("get_output_mode")))
+
 	# 0018：资源加载器——把工程内的 mp4 直接 load() 成一路视频源。
 	if ResourceLoader.exists("res://clip8.mp4"):
 		var loaded: Variant = load("res://clip8.mp4")

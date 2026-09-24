@@ -88,7 +88,7 @@ test "着色器侧每个字段都是 float，Zig 侧每个字段都是 f32" {
     }
 }
 
-test "整个结构体是 48 字节且是 16 的倍数（Vulkan 的推送常量要求）" {
-    try testing.expectEqual(@as(usize, 48), @sizeOf(Nv12PushConstants));
+test "整个结构体是 64 字节且是 16 的倍数（Vulkan 的推送常量要求）" {
+    try testing.expectEqual(@as(usize, 64), @sizeOf(Nv12PushConstants));
     try testing.expectEqual(@as(usize, 0), @sizeOf(Nv12PushConstants) % 16);
 }

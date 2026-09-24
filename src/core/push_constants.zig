@@ -11,6 +11,23 @@
 
 const std = @import("std");
 const color = @import("color.zig");
+const hdr = @import("hdr.zig");
+
+/// HDR 输出的档位（与计划里 `output_mode` 的枚举一致）。
+pub const HdrMode = enum(u8) {
+    /// 直接按 SDR 处理（默认）。
+    sdr = 0,
+    /// PQ（SMPTE ST 2084，HDR10）。
+    pq = 1,
+    /// HLG（BT.2100）。
+    hlg = 2,
+};
+
+/// 素材原色的宽窄。BT.2020 的素材要**在线性光里**换算到 BT.709，否则整体偏色。
+pub const Gamut = enum(u8) {
+    bt709 = 0,
+    bt2020 = 1,
+};
 
 pub const Nv12PushConstants = extern struct {
     /// 码值 = 纹理样值 * sample_scale。8 位是 255，10 位是 65535；左对齐的容器
@@ -24,10 +41,33 @@ pub const Nv12PushConstants = extern struct {
     g_cb: f32,
     g_cr: f32,
     b_cb: f32,
-    /// 补到 48 字节：Vulkan 要求推送常量大小是 16 的倍数。
+    /// HDR 档位（0 = SDR，1 = PQ，2 = HLG）。
+    hdr_mode: f32 = 0.0,
+    /// 素材原色（0 = BT.709，1 = BT.2020）。非 0 时在线性光里换算。
+    gamut: f32 = 0.0,
+    /// 色调映射：素材参考峰值亮度（nits）。
+    tone_peak_nits: f32 = 1000.0,
+    /// 色调映射：映射到 SDR 白点的输入亮度（nits）。
+    tone_white_nits: f32 = 1000.0,
+    /// 补到 64 字节（Vulkan 要求推送常量大小是 16 的倍数）。
     pad0: f32 = 0.0,
     pad1: f32 = 0.0,
     pad2: f32 = 0.0,
+
+    /// 打上 HDR 档位与色调映射参数。SDR 档位下这几个字段是默认值，着色器会走直通路径。
+    pub fn withHdr(
+        base: Nv12PushConstants,
+        mode: HdrMode,
+        gamut: Gamut,
+        tone: hdr.ToneMap,
+    ) Nv12PushConstants {
+        var out = base;
+        out.hdr_mode = @floatFromInt(@intFromEnum(mode));
+        out.gamut = @floatFromInt(@intFromEnum(gamut));
+        out.tone_peak_nits = @floatCast(tone.peak_nits);
+        out.tone_white_nits = @floatCast(tone.white_nits);
+        return out;
+    }
 
     /// 由色彩标签 + 位深 + 容器的对齐方式算出全部常数。
     ///
@@ -69,13 +109,18 @@ pub const Nv12PushConstants = extern struct {
     }
 };
 
-test "推送常量是 48 字节、字段按 4 字节排布（GPU 侧的 ABI 前提）" {
-    try std.testing.expectEqual(@as(usize, 48), @sizeOf(Nv12PushConstants));
-    try std.testing.expectEqual(@as(usize, 48 % 16), @sizeOf(Nv12PushConstants) % 16);
+test "推送常量是 64 字节、字段按 4 字节排布（GPU 侧的 ABI 前提）" {
+    try std.testing.expectEqual(@as(usize, 64), @sizeOf(Nv12PushConstants));
+    try std.testing.expectEqual(@as(usize, 0), @sizeOf(Nv12PushConstants) % 16);
     try std.testing.expectEqual(@as(usize, 0), @offsetOf(Nv12PushConstants, "sample_scale"));
     try std.testing.expectEqual(@as(usize, 4), @offsetOf(Nv12PushConstants, "luma_offset"));
     try std.testing.expectEqual(@as(usize, 32), @offsetOf(Nv12PushConstants, "b_cb"));
-    try std.testing.expectEqual(@as(usize, 36), @offsetOf(Nv12PushConstants, "pad0"));
+    // HDR 那四个字段接在矩阵之后：36 起、每个 4 字节。
+    try std.testing.expectEqual(@as(usize, 36), @offsetOf(Nv12PushConstants, "hdr_mode"));
+    try std.testing.expectEqual(@as(usize, 40), @offsetOf(Nv12PushConstants, "gamut"));
+    try std.testing.expectEqual(@as(usize, 44), @offsetOf(Nv12PushConstants, "tone_peak_nits"));
+    try std.testing.expectEqual(@as(usize, 48), @offsetOf(Nv12PushConstants, "tone_white_nits"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(Nv12PushConstants, "pad0"));
 }
 
 test "8 位视频范围 BT.709：常数就是标准值" {
