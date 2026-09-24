@@ -30,7 +30,7 @@ const RdTextureFormat = godot.class.RdTextureFormat;
 const RdTextureView = godot.class.RdTextureView;
 const Rid = godot.builtin.Rid;
 
-const si = @import("surface_importer.zig");
+const si = @import("platform_surface.zig");
 const PlaneTextures = si.PlaneTextures;
 
 const log = std.log.scoped(.native_video_vk_import);

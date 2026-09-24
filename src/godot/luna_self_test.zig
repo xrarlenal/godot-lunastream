@@ -46,10 +46,19 @@ const surface_mod = @import("surface_importer.zig");
 const Surface = surface_mod.Surface;
 const dispatcher_mod = @import("dispatching_surface_importer.zig");
 const DispatchingImporter = dispatcher_mod.DispatchingImporter;
-const metal_mod = @import("metal_surface_importer.zig");
-const bridge = @cImport({
+/// Metal 零拷贝用例只在 macOS 上存在。非 macOS 上这两处换成占位类型，让"字段声明"
+/// 在别的目标上也说得通；**真正用到它们的代码都在 comptime 分支里**，因此不会被
+/// 分析、也不会在链接期留下对 macOS 桥符号的引用（第一版没这么写，结果 Windows
+/// 交叉编译在链接时报 `undefined symbol: nv_cv_metal_view_destroy`）。
+const metal_supported = builtin.os.tag == .macos;
+
+const metal_mod = if (metal_supported) @import("metal_surface_importer.zig") else struct {
+    pub const MetalSurfaceImporter = struct {};
+};
+
+const bridge = if (metal_supported) @cImport({
     @cInclude("cv_metal_bridge.h");
-});
+}) else struct {};
 const Spec = core.texture_pool.Spec;
 const CpuPlanes = core.backend.CpuPlanes;
 const VideoFrame = core.backend.VideoFrame;
@@ -412,10 +421,14 @@ fn checkDispatcher(self: *LunaSelfTest, report: *Report) void {
 /// 换来的是零拷贝路径能在真机上被验证——包括"与像素缓冲行距不一致"这种一上手就会
 /// 踩到的坑。
 fn checkMetalImport(self: *LunaSelfTest, report: *Report) void {
-    if (builtin.os.tag != .macos) {
+    if (comptime metal_supported) {
+        checkMetalImportMac(self, report);
+    } else {
         report.note("跳过 Metal 零拷贝用例（当前平台不是 macOS）", .{});
-        return;
     }
+}
+
+fn checkMetalImportMac(self: *LunaSelfTest, report: *Report) void {
     if (!self.dispatcher_ready) {
         report.add(false, "分发器没建起来，Metal 用例无法挂上去", .{});
         return;
@@ -556,56 +569,8 @@ pub fn verify(self: *LunaSelfTest) String {
         report.add(equalBytes(dispatched_back, y_want), "分发路径交出的纹理同样逐字节一致", .{});
     }
 
-    // Metal 零拷贝：读回的必须是像素缓冲里我们写进去的内容，而且按纹理自己的
-    // 紧凑行距（与像素缓冲的行距不同）逐行对上。
-    if (self.have_metal_surface) {
-        // **不能**直接 textureGetData 那块别名进来的纹理：Godot 的 Metal 驱动在
-        // drivers/metal/rendering_device_driver_metal.mm:585 直接拒绝（实测，日志里
-        // 会打出这条 driver 报错），所以先在 GPU 内部把它拷到一块 Godot 自己创建的
-        // 暂存纹理，再读暂存纹理。
-        const width: u32 = 64;
-        const height: u32 = 48;
-        const luma_staging = createStagingTexture(self.importer.rd, width, height, .data_format_r8_unorm);
-        const chroma_staging = createStagingTexture(self.importer.rd, width / 2, height / 2, .data_format_r8g8_unorm);
-        defer {
-            if (self.importer.rd.textureIsValid(luma_staging)) self.importer.rd.freeRid(luma_staging);
-            if (self.importer.rd.textureIsValid(chroma_staging)) self.importer.rd.freeRid(chroma_staging);
-        }
-
-        self.importer.rd.submit();
-        self.importer.rd.sync();
-        const copied_luma = self.importer.rd.textureCopy(
-            lumaRid(self.metal_surface),
-            luma_staging,
-            .{ .x = 0, .y = 0, .z = 0 },
-            .{ .x = 0, .y = 0, .z = 0 },
-            .{ .x = @floatFromInt(width), .y = @floatFromInt(height), .z = 1 },
-            0,
-            0,
-            0,
-            0,
-        ) == .ok;
-        const copied_chroma = self.importer.rd.textureCopy(
-            chromaRid(self.metal_surface),
-            chroma_staging,
-            .{ .x = 0, .y = 0, .z = 0 },
-            .{ .x = 0, .y = 0, .z = 0 },
-            .{ .x = @floatFromInt(width / 2), .y = @floatFromInt(height / 2), .z = 1 },
-            0,
-            0,
-            0,
-            0,
-        ) == .ok;
-        report.add(copied_luma and copied_chroma, "把别名纹理拷进暂存纹理（GPU 内部拷贝）", .{});
-
-        self.importer.rd.submit();
-        self.importer.rd.sync();
-        var metal_luma = self.importer.rd.textureGetData(luma_staging, 0);
-        defer metal_luma.deinit();
-        var metal_chroma = self.importer.rd.textureGetData(chroma_staging, 0);
-        defer metal_chroma.deinit();
-        report.add(equalBytes(metal_luma, self.metal_luma_expect.?), "Metal 零拷贝：亮度平面逐字节一致", .{});
-        report.add(equalBytes(metal_chroma, self.metal_chroma_expect.?), "Metal 零拷贝：色度平面逐字节一致", .{});
+    if (comptime metal_supported) {
+        verifyMetalSurface(self, &report, y_want);
     }
 
     report.note("第一阶段创建纹理 {d} 块、上传平面 {d} 次、孤儿 {d} 块", .{
@@ -619,14 +584,72 @@ pub fn verify(self: *LunaSelfTest) String {
     return report.text();
 }
 
+/// Metal 零拷贝的像素级验证（只在 macOS 上被分析）。
+///
+/// **不能**直接 `textureGetData` 那块别名进来的纹理：Godot 的 Metal 驱动在
+/// `drivers/metal/rendering_device_driver_metal.mm:585` 直接拒绝（实测，日志里会打出
+/// 这条 driver 报错）并返回空数组——第一版就是这样"读回全零"。绕法是先在 GPU 内部
+/// 把它拷到一块 Godot 自己创建的暂存纹理（带 CAN_COPY_TO / CAN_COPY_FROM / CPU_READ），
+/// 再读暂存纹理。这条路也正是将来呈现管线要走的路：真出画时也是先算再读。
+fn verifyMetalSurface(self: *LunaSelfTest, report: *Report, y_want: []const u8) void {
+    if (!self.have_metal_surface) return;
+
+    const width: u32 = 64;
+    const height: u32 = 48;
+    const luma_staging = createStagingTexture(self.importer.rd, width, height, .data_format_r8_unorm);
+    const chroma_staging = createStagingTexture(self.importer.rd, width / 2, height / 2, .data_format_r8g8_unorm);
+    defer {
+        if (self.importer.rd.textureIsValid(luma_staging)) self.importer.rd.freeRid(luma_staging);
+        if (self.importer.rd.textureIsValid(chroma_staging)) self.importer.rd.freeRid(chroma_staging);
+    }
+
+    self.importer.rd.submit();
+    self.importer.rd.sync();
+    const copied_luma = self.importer.rd.textureCopy(
+        lumaRid(self.metal_surface),
+        luma_staging,
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = @floatFromInt(width), .y = @floatFromInt(height), .z = 1 },
+        0,
+        0,
+        0,
+        0,
+    ) == .ok;
+    const copied_chroma = self.importer.rd.textureCopy(
+        chromaRid(self.metal_surface),
+        chroma_staging,
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = 0, .y = 0, .z = 0 },
+        .{ .x = @floatFromInt(width / 2), .y = @floatFromInt(height / 2), .z = 1 },
+        0,
+        0,
+        0,
+        0,
+    ) == .ok;
+    report.add(copied_luma and copied_chroma, "把别名纹理拷进暂存纹理（GPU 内部拷贝）", .{});
+
+    self.importer.rd.submit();
+    self.importer.rd.sync();
+    var metal_luma = self.importer.rd.textureGetData(luma_staging, 0);
+    defer metal_luma.deinit();
+    var metal_chroma = self.importer.rd.textureGetData(chroma_staging, 0);
+    defer metal_chroma.deinit();
+    report.add(equalBytes(metal_luma, self.metal_luma_expect.?), "Metal 零拷贝：亮度平面逐字节一致", .{});
+    report.add(equalBytes(metal_chroma, self.metal_chroma_expect.?), "Metal 零拷贝：色度平面逐字节一致", .{});
+    _ = y_want;
+}
+
 fn teardown(self: *LunaSelfTest) void {
     if (self.have_metal_surface) {
         self.metal_surface.release();
         self.have_metal_surface = false;
     }
-    if (self.metal) |*importer| {
-        importer.deinit();
-        self.metal = null;
+    if (comptime metal_supported) {
+        if (self.metal) |*importer| {
+            importer.deinit();
+            self.metal = null;
+        }
     }
     if (self.metal_luma_expect) |b| {
         self.allocator.free(b);

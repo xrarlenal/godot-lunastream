@@ -31,7 +31,7 @@ const importer_selector = @import("importer_selector.zig");
 const selectImporter = importer_selector.selectImporter;
 const ImporterKind = importer_selector.ImporterKind;
 
-const si = @import("surface_importer.zig");
+const si = @import("platform_surface.zig");
 const ImportResult = si.ImportResult;
 
 const D3D12SurfaceImporter = @import("d3d12_surface_importer.zig").D3D12SurfaceImporter;

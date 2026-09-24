@@ -12,6 +12,19 @@ const Registry = godot.extension.Registry;
 const LunaVideoStream = @import("luna_video_stream.zig");
 const LunaSelfTest = @import("luna_self_test.zig");
 
+const builtin = @import("builtin");
+
+comptime {
+    // 平台导入器只在各自的目标上参与编译。它们是 0016 / 0017 的载体，从源工程
+    // 搬入，尚未在本仓库的真机上验证（见 docs/platform-port.md）。放在 comptime
+    // 里引用是为了让"交叉编译能不能过"成为一条真实可跑的检查，而不是靠人记得手动编。
+    if (builtin.os.tag == .windows) {
+        _ = @import("windows_surface_importer.zig");
+    } else if (builtin.os.tag == .linux) {
+        _ = @import("vulkan_surface_importer.zig");
+    }
+}
+
 pub fn register(r: *Registry) void {
     r.addModule(LunaVideoStream);
     r.addModule(LunaSelfTest);

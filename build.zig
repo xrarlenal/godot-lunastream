@@ -237,6 +237,32 @@ pub fn build(b: *Build) !void {
         }
     }
 
+    // Windows 平台导入器（0016，从源工程搬入）依赖一层手写的 COM/D3D 绑定。
+    // 只在 Windows 目标下把它挂成模块——别的平台既不编译也不解析这些文件。
+    if (target.result.os.tag == .windows) {
+        const win_mod = b.createModule(.{
+            .root_source_file = b.path("src/win/root.zig"),
+            .target = target,
+            .optimize = optimize,
+        });
+        ext_mod.addImport("win", win_mod);
+    }
+
+    // Linux 侧的原生 shim（0017，从源工程搬入）：dma-buf → VkImage 的导入。
+    // 它**不链 libvulkan**（自己用 dlopen 解析 loader），所以这里只需要 Vulkan 头。
+    // 头文件路径按机器给：默认取 Homebrew 的 /usr/local/include，可用
+    // -Dvulkan-include=<dir> 覆盖（CI 上用系统包或 vcpkg 时就要覆盖）。
+    if (target.result.os.tag == .linux) {
+        const vulkan_include = b.option([]const u8, "vulkan-include", "Vulkan 头文件目录（Linux 目标编译 vk shim 用）") orelse "/usr/local/include";
+        ext_mod.addIncludePath(b.path("src/ffva"));
+        ext_mod.addIncludePath(.{ .cwd_relative = vulkan_include });
+        ext_mod.addCSourceFile(.{
+            .file = b.path("src/ffva/vk_import_shim.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+        });
+        ext_mod.linkSystemLibrary("dl", .{});
+    }
+
     const extension = gdzig.addExtension(b, .{
         .name = "lunastream",
         .root_module = ext_mod,

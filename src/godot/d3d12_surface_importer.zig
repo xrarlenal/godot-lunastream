@@ -73,14 +73,14 @@ const godot = @import("godot");
 const RenderingDevice = godot.class.RenderingDevice;
 const Rid = godot.builtin.Rid;
 
-const win = @import("mf").win;
+const win = @import("win");
 const com = win.com;
 const dxgi = win.dxgi;
 const d3d11 = win.d3d11;
 const d3d12 = win.d3d12;
 const d3dcompiler = win.d3dcompiler;
 
-const si = @import("surface_importer.zig");
+const si = @import("platform_surface.zig");
 const PlaneTextures = si.PlaneTextures;
 
 const wic = @import("windows_import_common.zig");

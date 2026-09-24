@@ -8,7 +8,7 @@
 
 const std = @import("std");
 
-const win = @import("mf").win;
+const win = @import("win");
 const com = win.com;
 const dxgi = win.dxgi;
 const d3d11 = win.d3d11;

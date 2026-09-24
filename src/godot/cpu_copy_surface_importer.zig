@@ -46,7 +46,7 @@ const RenderingDevice = godot.class.RenderingDevice;
 const Rid = godot.builtin.Rid;
 const PackedByteArray = godot.builtin.PackedByteArray;
 
-const win = @import("mf").win;
+const win = @import("win");
 const com = win.com;
 const dxgi = win.dxgi;
 const d3d11 = win.d3d11;
@@ -56,7 +56,7 @@ const d3d11 = win.d3d11;
 // duplicating the stride/row handling on every platform.
 const pc = @import("plane_copy.zig");
 
-const si = @import("surface_importer.zig");
+const si = @import("platform_surface.zig");
 const PlaneTextures = si.PlaneTextures;
 const ImportResult = si.ImportResult;
 
