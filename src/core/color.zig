@@ -222,6 +222,117 @@ pub fn ycbcrToRgb(y: f64, cb: f64, cr: f64, coeffs: Coefficients) Rgb {
     };
 }
 
+/// 归一化的**仿射**形式：`归一值 = (码值 - offset) * gain`。
+///
+/// 存在的理由：`normalizeLuma` / `normalizeChroma` 里那些 switch 与除法的结果，
+/// 对码值来说就是一条直线（视频范围是减黑再加满量程，全范围是直接缩放到满量程）。
+/// 而 GPU 侧只想做"一次乘加"，不该把 switch 搬到 shader 里——那样数学就有两份，
+/// 迟早会漂移。
+///
+/// 所以 CPU 把这条直线算出来，shader 只执行它；下面那组测试钉住"仿射形式与逐码值
+/// 函数给出同一个结果"，将来 shader 落地时再加一条"GLSL 里的常数与这里一致"。
+///
+/// **只对右对齐（`code_shift == 0`）的输入成立**：左对齐（P010 / x420）是"先右移再
+/// 归一"，整体不是一个关于容器码值的纯仿射函数。本插件的软解路径统一右对齐（见
+/// ffsw shim 的约定），所以呈现侧的推送常量按右对齐算；将来接 VAAPI 的 P010 时，
+/// 要么在导入侧先归一，要么把右移位也写进 shader。
+pub const Affine = struct {
+    offset: f64,
+    gain: f64,
+
+    pub fn apply(self: Affine, code: f64) f64 {
+        return (code - self.offset) * self.gain;
+    }
+};
+
+/// 亮度的仿射归一化常数。
+pub fn lumaAffine(layout: SampleLayout, range: ColorRange) Affine {
+    switch (range) {
+        .full => return .{ .offset = 0.0, .gain = 1.0 / layout.maxCode() },
+        .video => {
+            const scale = layout.bit_depth.scale();
+            const black = 16.0 * scale;
+            const white = 235.0 * scale;
+            return .{ .offset = black, .gain = 1.0 / (white - black) };
+        },
+    }
+}
+
+/// 色度的仿射归一化常数。
+pub fn chromaAffine(layout: SampleLayout, range: ColorRange) Affine {
+    const mid = layout.bit_depth.midCode();
+    switch (range) {
+        .full => return .{ .offset = mid, .gain = 1.0 / layout.maxCode() },
+        .video => {
+            const scale = layout.bit_depth.scale();
+            const peak = 240.0 * scale;
+            return .{ .offset = mid, .gain = 1.0 / (2.0 * (peak - mid)) };
+        },
+    }
+}
+
+test "亮度仿射常数与逐码值归一化在两种位深、两种范围下完全一致" {
+    const cases = .{
+        .{ SampleLayout.right_justified_8, ColorRange.video },
+        .{ SampleLayout.right_justified_8, ColorRange.full },
+        .{ SampleLayout.right_justified_10, ColorRange.video },
+        .{ SampleLayout.right_justified_10, ColorRange.full },
+    };
+    inline for (cases) |case| {
+        const layout = case[0];
+        const range = case[1];
+        const affine = lumaAffine(layout, range);
+        var code: f64 = 0;
+        while (code <= layout.maxCode()) : (code += 1) {
+            try std.testing.expectApproxEqAbs(normalizeLuma(code, layout, range), affine.apply(code), 1e-12);
+        }
+    }
+}
+
+test "色度仿射常数与逐码值归一化在两种位深、两种范围下完全一致" {
+    const cases = .{
+        .{ SampleLayout.right_justified_8, ColorRange.video },
+        .{ SampleLayout.right_justified_8, ColorRange.full },
+        .{ SampleLayout.right_justified_10, ColorRange.video },
+        .{ SampleLayout.right_justified_10, ColorRange.full },
+    };
+    inline for (cases) |case| {
+        const layout = case[0];
+        const range = case[1];
+        const affine = chromaAffine(layout, range);
+        var code: f64 = 0;
+        while (code <= layout.maxCode()) : (code += 1) {
+            try std.testing.expectApproxEqAbs(normalizeChroma(code, layout, range), affine.apply(code), 1e-12);
+        }
+    }
+}
+
+// 这两条把"即将写进推送常量的具体数字"钉死。注意归一化的增益是**满量程的倒数**：
+// 8 位视频范围的亮度是 (v - 16) / 219，色度是 (v - 128) / 224（色度从中点到上界是
+// 112，而满量程是它的两倍 = 224）。10 位按位深等比放大：64 / 876 与 512 / 896。
+//
+// 别把它与 RGB 矩阵里的 255/219 混起来——那是"归一化之后再乘的系数"，两者不是一回事
+// （这条注释就是我被自己绊了一跤之后加的：第一版测试期望写的正是 255/219）。
+test "8 位视频范围的仿射常数是标准值（黑电平 16、满量程 219）" {
+    const luma = lumaAffine(.right_justified_8, .video);
+    try std.testing.expectApproxEqAbs(@as(f64, 16.0), luma.offset, 1e-12);
+    try std.testing.expectApproxEqAbs(1.0 / 219.0, luma.gain, 1e-12);
+
+    const chroma = chromaAffine(.right_justified_8, .video);
+    try std.testing.expectApproxEqAbs(@as(f64, 128.0), chroma.offset, 1e-12);
+    try std.testing.expectApproxEqAbs(1.0 / 224.0, chroma.gain, 1e-12);
+}
+
+test "10 位视频范围的仿射常数按位深等比放大（64 / 512，满量程 876 / 896）" {
+    const luma = lumaAffine(.right_justified_10, .video);
+    try std.testing.expectApproxEqAbs(@as(f64, 64.0), luma.offset, 1e-12);
+    try std.testing.expectApproxEqAbs(1.0 / 876.0, luma.gain, 1e-12);
+
+    const chroma = chromaAffine(.right_justified_10, .video);
+    try std.testing.expectApproxEqAbs(@as(f64, 512.0), chroma.offset, 1e-12);
+    try std.testing.expectApproxEqAbs(1.0 / 896.0, chroma.gain, 1e-12);
+}
+
 // ---------------------------------------------------------------------------
 // 测试
 // ---------------------------------------------------------------------------
