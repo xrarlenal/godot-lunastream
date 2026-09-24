@@ -70,6 +70,11 @@ pub const PresentPipeline = struct {
     cached_chroma: Rid = undefined,
     presents: u64 = 0,
 
+    /// 可复用的描述符对象（理由见 cpu_frame_importer 里同名字段的注释：0022 实测这类
+    /// gdzig 辅助对象引用计数归零后仍留在 ObjectDB，少建一个就少泄漏一份）。
+    format: *RdTextureFormat = undefined,
+    view: *RdTextureView = undefined,
+
     pub fn init(
         allocator: Allocator,
         rd: *RenderingDevice,
@@ -83,6 +88,8 @@ pub const PresentPipeline = struct {
             .options = options,
             .width = width,
             .height = height,
+            .format = RdTextureFormat.init(),
+            .view = RdTextureView.init(),
         };
 
         // 1) GLSL 到 SPIR-V 再到 shader RID。Godot 自带 glslang，所以运行期编得动。
@@ -133,6 +140,8 @@ pub const PresentPipeline = struct {
     }
 
     pub fn deinit(self: *PresentPipeline) void {
+        _ = self.format.unreference();
+        _ = self.view.unreference();
         if (self.uniform_set.isValid()) self.rd.freeRid(self.uniform_set);
         if (self.output.isValid()) self.rd.freeRid(self.output);
         if (self.sampler.isValid()) self.rd.freeRid(self.sampler);
@@ -187,20 +196,16 @@ pub const PresentPipeline = struct {
     // -----------------------------------------------------------------------
 
     fn createOutputTexture(self: *PresentPipeline) !Rid {
-        const fmt = RdTextureFormat.init();
-        defer _ = fmt.unreference();
-        const view = RdTextureView.init();
-        defer _ = view.unreference();
-        fmt.setWidth(self.width);
-        fmt.setHeight(self.height);
-        fmt.setFormat(.data_format_r8g8b8a8_unorm);
-        fmt.setUsageBits(.{
+        self.format.setWidth(self.width);
+        self.format.setHeight(self.height);
+        self.format.setFormat(.data_format_r8g8b8a8_unorm);
+        self.format.setUsageBits(.{
             .texture_usage_sampling_bit = true,
             .texture_usage_storage_bit = true,
             .texture_usage_can_copy_from_bit = self.options.enable_readback,
             .texture_usage_cpu_read_bit = self.options.enable_readback,
         });
-        return self.rd.textureCreate(fmt, view, .{});
+        return self.rd.textureCreate(self.format, self.view, .{});
     }
 
     fn rebuildUniformSet(self: *PresentPipeline, luma: Rid, chroma: Rid) Error!void {

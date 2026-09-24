@@ -116,6 +116,15 @@ pub const CpuFrameImporter = struct {
     created_textures: u64 = 0,
     uploads: u64 = 0,
 
+    /// 建纹理时用的**可复用**描述符对象。
+    ///
+    /// 0022 的实测：gdzig 用 `classdbConstructObject` + `initRef()` 造出来的这类辅助
+    /// 对象，引用计数归零后仍会留在 ObjectDB 里（退出时报泄漏）。每建一块纹理就新建
+    /// 一对，泄漏数就随槽位数涨（12 槽 = 12 对）。复用一个对象后它只泄漏一份，
+    /// 而且省掉了每次创建的引擎调用。
+    format: *RdTextureFormat = undefined,
+    view: *RdTextureView = undefined,
+
     /// 用主线程的（非本地）RenderingDevice 构造——生产路径用这个。
     pub fn init(allocator: Allocator, options: Options) Error!CpuFrameImporter {
         const rd = RenderingServer.getRenderingDevice() orelse return Error.NoRenderingDevice;
@@ -132,10 +141,19 @@ pub const CpuFrameImporter = struct {
     /// 代价要说清楚：本地设备的用例证明的是导入器**逻辑**（布局、槽位、上传调用）
     /// 正确，不证明主设备上一样；主设备上的正确性要到呈现管线那一步用"出画"来验。
     pub fn initWithDevice(allocator: Allocator, rd: *RenderingDevice, options: Options) Error!CpuFrameImporter {
-        return .{ .allocator = allocator, .rd = rd, .options = options };
+        // 描述符对象在这里建一次、之后反复改写（见字段注释：少建 = 少泄漏）。
+        return .{
+            .allocator = allocator,
+            .rd = rd,
+            .options = options,
+            .format = RdTextureFormat.init(),
+            .view = RdTextureView.init(),
+        };
     }
 
     pub fn deinit(self: *CpuFrameImporter) void {
+        _ = self.format.unreference();
+        _ = self.view.unreference();
         for (&self.slots) |*slot| {
             if (slot.valid) {
                 self.freeRid(slot.y);
@@ -276,15 +294,10 @@ pub const CpuFrameImporter = struct {
     }
 
     fn createTexture(self: *CpuFrameImporter, spec: Spec, is_chroma: bool) Rid {
-        const fmt = RdTextureFormat.init();
-        defer _ = fmt.unreference();
-        const view = RdTextureView.init();
-        defer _ = view.unreference();
-
-        fmt.setWidth(if (is_chroma) (spec.width + 1) / 2 else spec.width);
-        fmt.setHeight(if (is_chroma) (spec.height + 1) / 2 else spec.height);
-        fmt.setFormat(if (is_chroma) self.chromaFormat(spec) else self.lumaFormat(spec));
-        fmt.setUsageBits(.{
+        self.format.setWidth(if (is_chroma) (spec.width + 1) / 2 else spec.width);
+        self.format.setHeight(if (is_chroma) (spec.height + 1) / 2 else spec.height);
+        self.format.setFormat(if (is_chroma) self.chromaFormat(spec) else self.lumaFormat(spec));
+        self.format.setUsageBits(.{
             .texture_usage_sampling_bit = true,
             .texture_usage_can_update_bit = true,
             .texture_usage_can_copy_from_bit = self.options.cpu_readback,
@@ -292,7 +305,7 @@ pub const CpuFrameImporter = struct {
         });
 
         self.created_textures += 1;
-        return self.rd.textureCreate(fmt, view, .{});
+        return self.rd.textureCreate(self.format, self.view, .{});
     }
 
     fn lumaFormat(_: *const CpuFrameImporter, spec: Spec) RenderingDevice.DataFormat {
