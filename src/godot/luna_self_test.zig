@@ -381,6 +381,7 @@ fn checkDispatcher(self: *LunaSelfTest, report: *Report) void {
         after_cpu.platform, after_cpu.rejected,
     });
     report.add(self.dispatched.planes == .luma_chroma, "CPU 路径交出的是「亮度 + 交织色度」两块纹理", .{});
+    report.add(self.dispatched.raw_code_shift == 0, "CPU 上传路径的移位是 0（0011 已在 shim 里统一右对齐）", .{});
     report.add(self.dispatched.spec.eql(self.spec8), "分发结果带着帧自己的规格（{d}x{d}）", .{
         self.dispatched.spec.width, self.dispatched.spec.height,
     });
@@ -500,6 +501,7 @@ fn checkMetalImport(self: *LunaSelfTest, report: *Report) void {
     });
     report.add(after.cpu == before.cpu, "走平台路径时没有动 CPU 计数（仍 {d}）", .{after.cpu});
     report.add(self.metal_surface.planes == .luma_chroma, "Metal 路径交出亮度 + 交织色度两块纹理", .{});
+    report.add(self.metal_surface.raw_code_shift == 0, "Metal 8-bit 路径的移位是 0（8-bit 与移位无关）", .{});
     const metal_stats = self.metal.?.stats();
     report.add(metal_stats.in_flight == 1 and metal_stats.textures == 2, "导入器记账：在飞 {d} 帧、创建 {d} 块纹理", .{
         metal_stats.in_flight, metal_stats.textures,

@@ -42,6 +42,16 @@ pub const PlaneSet = union(enum) {
 pub const Surface = struct {
     spec: Spec,
     planes: PlaneSet,
+    /// 着色器在读这一帧之前要把 16 位样值**右移**多少位（0 或 6）。
+    ///
+    /// 为什么需要它：本仓库的软解路径在 shim 里就把 10-bit 统一成右对齐了
+    /// （0011：P010 左对齐 → 原地右移 6 位），所以 CPU 上传路径恒为 0。但平台路径
+    /// 拿到的原生表面不归我们管：VAAPI 的 P010 与 CoreVideo 的 x420 都是**左对齐**
+    /// （码值在高位、低 6 位是零），只能用右移位还原。
+    ///
+    /// 这是从源工程搬平台导入器时才看清的一条：**左对齐不是"另一种像素格式"，而是
+    /// 同一份数据的一个移位**，所以它属于"帧的元数据"，不属于"格式"。
+    raw_code_shift: u32 = 0,
     /// 消费者用完必须调 `release()`。
     release_hook: VoidClosure,
 
@@ -53,6 +63,20 @@ pub const Surface = struct {
 pub const Error = error{
     /// 这帧不是本导入器能吃的（分发器负责在调用前判对，真发生了就是接线错误）。
     UnsupportedFrame,
+    /// 帧还没准备好（平台侧资源尚未就绪，下一帧再试即可）。
+    NotReady,
+    /// 帧本身是坏的（尺寸/格式不合法）。丢掉这一帧，不必换架构。
+    BadFrame,
+    /// 这一帧失败但属于暂时性（驱动忙、等待超时）。**不要**据此降级整条会话。
+    TransientFailure,
+    /// 这台机器/这个渲染驱动**根本不支持**这条零拷贝路径（例如 Windows 上 Godot
+    /// 跑在与解码器不同的适配器上）。
+    ///
+    /// 与 `TransientFailure` 的区别是这一步的要点，也是从源工程学来的：只有
+    /// "能力不可用"才允许选择器**永久**放弃这条路径并降级到 CPU 拷贝。两者混在
+    /// 一起的后果是——网络或驱动的一次抖动，就把整条会话从零拷贝降成每帧读回，
+    /// 而使用者只会看到"性能莫名其妙掉了"。
+    CapabilityUnavailable,
     /// 没有可用的 RenderingDevice（`--headless`）。
     NoRenderingDevice,
     /// 纹理池取满：消费者没归还，属于背压。
