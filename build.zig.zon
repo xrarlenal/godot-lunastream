@@ -3,10 +3,16 @@
     .version = "0.0.0",
     .minimum_zig_version = "0.16.0",
     .fingerprint = 0x3beee075d3bb93c4,
-    .dependencies = .{},
+    .dependencies = .{
+        // 按字节 vendor 的绑定生成器，见 vendor/README.md。
+        .gdzig = .{
+            .path = "vendor/gdzig",
+        },
+    },
     .paths = .{
         "build.zig",
         "build.zig.zon",
         "src",
+        "vendor",
     },
 }

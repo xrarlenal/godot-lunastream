@@ -29,12 +29,31 @@ scope 用目录名：`core` / `ffsw` / `ffvt` / `godot` / `vk` / `docs`。
 ## 验证
 
 ```bash
-# core 单元测试：不需要 Godot、不需要 GPU、跨平台可跑
+# 1) core 单元测试：不需要 Godot、不需要 GPU、跨平台可跑
 zig build test
+
+# 2) 构建 GDExtension 并安装进示例工程：需要一份 Godot 可执行文件
+zig build -Dgodot-path="/Applications/Godot.app/Contents/MacOS/Godot"
+
+# 3) 引擎侧自检：确认扩展被加载、类能实例化、绑定可用
+"/Applications/Godot.app/Contents/MacOS/Godot" --headless --path example/gdextension-smoke --import
+"/Applications/Godot.app/Contents/MacOS/Godot" --headless --path example/gdextension-smoke
 ```
 
-后续功能点会依次加入 `zig build decode-smoke`（不需要 Godot 的真流解码烟测）
-与扩展构建。**任何提交都必须让 `zig build test` 保持通过。**
+**任何提交都必须让 `zig build test` 保持通过。**
+
+几个已经踩过的坑：
+
+- **`zig` 必须在 `PATH` 上**，只给绝对路径调用不够——gdzig 的 bindgen 会
+  spawn `zig fmt`，找不到就报 `FileNotFound`。
+- **首次构建需要联网**：gdzig 自己的依赖（`bbcodez` / `casez` / `oopz` /
+  `temp` / `godot-versions`）由 Zig 包管理器按 pinned 的 url + hash 拉取，
+  之后走全局缓存。离线机器需要先把这些包补进缓存。
+- **第 3 步的 `--import` 在 Godot 4.6.2 上会在退出时崩一次**，属既有问题
+  （对照证据见 `docs/features/0003-gdextension-skeleton.md`）；缓存在崩溃前
+  已写好，接着跑第 3 步的最后一条即可。
+
+后续功能点会依次加入 `zig build decode-smoke`（不需要 Godot 的真流解码烟测）。
 
 ## 工具链
 

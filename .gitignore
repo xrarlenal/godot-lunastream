@@ -1,9 +1,11 @@
 # Zig
 .zig-cache/
 zig-out/
+zig-pkg/
 
 # Godot
-.godot/
+# 用通配前缀：调试时把缓存挪成 .godot.bak1 这类名字，同样不该入库。
+.godot*/
 *.uid
 
 # 构建产物

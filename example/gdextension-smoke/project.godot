@@ -1,0 +1,13 @@
+; 最小验证工程：确认扩展被加载、类能实例化、属性与方法的绑定可用。
+
+config_version=5
+
+[application]
+
+config/name="LunaStream GDExtension Smoke"
+run/main_scene="res://smoke.tscn"
+config/features=PackedStringArray("4.6", "Forward Plus")
+
+[audio]
+
+driver/driver="Dummy"

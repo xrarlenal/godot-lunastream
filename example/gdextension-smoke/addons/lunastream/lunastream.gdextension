@@ -1,0 +1,19 @@
+; LunaStream 的 GDExtension 清单。
+;
+; 库路径是相对于本文件的，所以清单必须和产物放在同一目录。
+; entry_symbol 必须与 build.zig 里的 entry_symbol 一致。
+
+[configuration]
+
+entry_symbol = "lunastream_init"
+compatibility_minimum = "4.6"
+reloadable = false
+
+[libraries]
+
+macos.debug = "liblunastream.dylib"
+macos.release = "liblunastream.dylib"
+windows.debug = "lunastream.dll"
+windows.release = "lunastream.dll"
+linux.debug = "liblunastream.so"
+linux.release = "liblunastream.so"

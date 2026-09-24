@@ -1,0 +1,50 @@
+.{
+    .name = .godot,
+    .version = "0.0.0-dev",
+    .fingerprint = 0x74a61aa48e9841ab,
+    .minimum_zig_version = "0.16.0",
+
+    .dependencies = .{
+        .bbcodez = .{
+            .url = "git+https://github.com/gdzig/bbcodez#711dce8ae5e77a5a3f2db832a26426fa79348470",
+            .hash = "bbcodez-0.0.1-dev-YlrOBjShAQDJCxJOom-ZTHH5YynVnnPTnHCOtm4Vad3X",
+        },
+        .casez = .{
+            .url = "git+https://github.com/gdzig/casez#9732adbfd8c591ddd6e9c3feab016bf9af779d6c",
+            .hash = "casez-0.0.1-aTb4GruMAAB_mjFKqes-KoN2jNXSLpB856W-8ZL22krx",
+        },
+        .emsdk = .{
+            .url = "https://github.com/emscripten-core/emsdk/archive/refs/tags/4.0.20.tar.gz",
+            .hash = "N-V-__8AADn0DwBtrxa-qJrkru1KtGp4EA9dRIuW2x70KtFc",
+            .lazy = true,
+        },
+        .godot = .{
+            .url = "git+https://github.com/claytercek/godot-versions#4e7176ef6b583898752e61fc6e46a7f929b3511c",
+            .hash = "godot-0.0.0-Nast2tcyBwCdKTy_KgdERhxFFgRw32tF6m4TaksjNfkl",
+        },
+        .oopz = .{
+            .url = "git+https://github.com/gdzig/oopz#e37ece30bdafc185e88a4bb5d9869115c8d8503f",
+            .hash = "oopz-0.0.0-pFJy_ddWAAABM-zKPi6ChgcCRYMOuWKbEFwEqsfNU-4U",
+        },
+        .temp = .{
+            .url = "git+https://github.com/abhinav/temp.zig#7f0a9697d3d46d06c4f84fc3bc5199b7779fab33",
+            .hash = "temp-0.3.0-Ogl1Ff5-AABRtiHj_zDFI0CZVU8ORLPko6iQiw63Znrz",
+        },
+    },
+
+    .paths = .{
+        "LICENSE",
+        "README.md",
+        "gdzig",
+        "gdzig_common",
+        "gdzig_bindgen",
+        "gdzig_test",
+        "test",
+        "build",
+        "build.zig",
+        "build.zig.zon",
+        "example",
+        "pkg",
+        "src",
+    },
+}

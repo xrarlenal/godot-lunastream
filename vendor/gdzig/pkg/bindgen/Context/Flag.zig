@@ -1,0 +1,197 @@
+const Flag = @This();
+
+doc: ?[]const u8 = null,
+module: []const u8 = "",
+name: []const u8 = "_",
+name_api: []const u8 = "_",
+fields: StringArrayHashMap(Field) = .empty,
+consts: StringArrayHashMap(Const) = .empty,
+padding: u8 = 0,
+representation: Representation = .u32,
+
+pub const Representation = enum {
+    u32,
+    u64,
+
+    pub fn name(self: Representation) []const u8 {
+        return switch (self) {
+            .u32 => "u32",
+            .u64 => "u64",
+        };
+    }
+};
+
+pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum, ctx: *const Context) !Flag {
+    var self: Flag = .{};
+    errdefer self.deinit(allocator);
+
+    self.name = try casez.allocConvert(allocator, gdzig_case.type, api.name);
+    self.name_api = api.name;
+    self.module = try casez.allocConvert(allocator, gdzig_case.file, self.name);
+
+    // Godot's extension_api.json does not guarantee that power-of-two flag
+    // values are listed in ascending bit order (e.g. RenderingDevice's
+    // TextureUsageBits lists bit 12 before bit 3). Collect the bitfield
+    // members first (recording the _DEFAULT value along the way; Godot
+    // bitfields carry exactly one), then lay them out sorted by bit
+    // position so each field lands at exactly @ctz(its value).
+    var default: i64 = 0;
+
+    var bit_values: std.ArrayListUnmanaged(GodotApi.GlobalEnum.Value) = .empty;
+    defer bit_values.deinit(allocator);
+
+    for (api.values) |value| {
+        if (std.mem.endsWith(u8, value.name, "_DEFAULT")) {
+            default = value.value;
+            try self.consts.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx));
+            continue;
+        }
+
+        if (value.value > 0 and std.math.isPowerOfTwo(value.value)) {
+            try bit_values.append(allocator, value);
+        } else {
+            try self.consts.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx));
+        }
+    }
+
+    std.mem.sort(GodotApi.GlobalEnum.Value, bit_values.items, {}, struct {
+        fn lessThan(_: void, a: GodotApi.GlobalEnum.Value, b: GodotApi.GlobalEnum.Value) bool {
+            return a.value < b.value;
+        }
+    }.lessThan);
+
+    var position: u8 = 0;
+    var last_value: ?i64 = null;
+    for (bit_values.items) |value| {
+        // Some Godot bitfields alias more than one name onto the same bit
+        // (e.g. Mesh.ArrayFormat's ARRAY_FORMAT_CUSTOM1_SHIFT colliding with
+        // ARRAY_FORMAT_TEX_UV2, or PropertyUsageFlags.NO_EDITOR aliasing an
+        // earlier flag). Only the first-declared name for a given value
+        // becomes a packed struct field; later names sharing that value are
+        // emitted as bitcast constants instead, same as non-power-of-two
+        // values.
+        if (last_value == value.value) {
+            try self.consts.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx));
+            continue;
+        }
+        last_value = value.value;
+
+        const expected_position = @ctz(value.value);
+
+        // Fill in any missing bit positions with placeholder fields
+        while (position < expected_position) : (position += 1) {
+            if (ctx.config.verbosity == .verbose) {
+                std.debug.print("{s} expected position: {} Actual: {}\n", .{ self.name, expected_position, position });
+            }
+            const name = try std.fmt.allocPrint(allocator, "@\"{d}\"", .{position});
+            try self.fields.put(allocator, name, .{
+                .name = name,
+            });
+        }
+
+        // Add the field at the correct bit position
+        try self.fields.put(allocator, value.name, try .fromGlobalEnum(allocator, class_name, value, ctx, default));
+        position += 1;
+    }
+
+    if (position > 32) {
+        self.representation = .u64;
+    }
+
+    self.padding = switch (self.representation) {
+        .u32 => 32 - position,
+        .u64 => 64 - position,
+    };
+
+    return self;
+}
+
+pub fn deinit(self: *Flag, allocator: Allocator) void {
+    if (self.doc) |doc| allocator.free(doc);
+    allocator.free(self.module);
+    allocator.free(self.name);
+
+    for (self.fields.values()) |*value| {
+        value.deinit(allocator);
+    }
+    self.fields.deinit(allocator);
+
+    for (self.consts.values()) |*@"const"| {
+        @"const".deinit(allocator);
+    }
+    self.consts.deinit(allocator);
+
+    self.* = .{};
+}
+
+pub const Field = struct {
+    doc: ?[]const u8 = null,
+    name: []const u8 = "_",
+    default: bool = false,
+
+    pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum.Value, ctx: *const Context, default: i64) !Field {
+        const doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx, .{
+            .current_class = class_name,
+            .verbosity = ctx.config.verbosity,
+        }) else null;
+        errdefer allocator.free(doc orelse "");
+
+        const name = try casez.allocConvert(allocator, gdzig_case.file, api.name);
+        errdefer allocator.free(name);
+
+        return Field{
+            .doc = doc,
+            .name = name,
+            .default = default & api.value == api.value,
+        };
+    }
+
+    pub fn deinit(self: *Field, allocator: Allocator) void {
+        if (self.doc) |doc| allocator.free(doc);
+        allocator.free(self.name);
+
+        self.* = .{};
+    }
+};
+
+pub const Const = struct {
+    doc: ?[]const u8 = null,
+    name: []const u8 = "_",
+    value: i64 = 0,
+
+    pub fn fromGlobalEnum(allocator: Allocator, class_name: ?[]const u8, api: GodotApi.GlobalEnum.Value, ctx: *const Context) !Const {
+        const doc = if (api.description) |desc| try docs.convertDocsToMarkdown(allocator, desc, ctx, .{
+            .current_class = class_name,
+            .verbosity = ctx.config.verbosity,
+        }) else null;
+        errdefer allocator.free(doc orelse "");
+
+        const name = try casez.allocConvert(allocator, gdzig_case.file, api.name);
+        errdefer allocator.free(name);
+
+        return Const{
+            .doc = doc,
+            .name = name,
+            .value = api.value,
+        };
+    }
+
+    pub fn deinit(self: *Const, allocator: Allocator) void {
+        if (self.doc) |doc| allocator.free(doc);
+        allocator.free(self.name);
+
+        self.* = .{};
+    }
+};
+
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+const StringArrayHashMap = std.StringArrayHashMapUnmanaged;
+const Context = @import("../Context.zig");
+
+const casez = @import("casez");
+const common = @import("common");
+const gdzig_case = common.gdzig_case;
+
+const GodotApi = @import("../GodotApi.zig");
+const docs = @import("docs.zig");
