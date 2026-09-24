@@ -17,6 +17,11 @@ zig-pkg/
 *.dll
 *.pdb
 
+# 示例工程里随包安装的 Vulkan Layer（构建产物）。
+# 源文件在 src/vulkan_layer/；这里被装上的是 .so 与清单的副本，两者同目录才能被
+# 运行时找到（清单里的 library_path 是相对清单自己的），但都不该入库。
+example/gdextension-smoke/addons/lunastream/luna_layer/
+
 # macOS
 .DS_Store
 
