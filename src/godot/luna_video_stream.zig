@@ -84,7 +84,18 @@ pub fn recreate(allocator: *Allocator, obj: *Object) *LunaVideoStream {
 }
 
 pub fn destroy(self: *LunaVideoStream, allocator: *Allocator) void {
-    self.base.destroy();
+    // 这里**不能**写 `self.base.destroy()`（源工程与 gdzig 的示例都是这么写的）。
+    //
+    // 原因：gdzig 为具体类生成的 `destroy` 带一层守卫——
+    //     if (destroy_meta.engine_destroying) return;   // 引擎正在销毁 → 直接返回
+    //     raw.objectDestroy(self.ptr());
+    // 而销毁回调 `destroyImpl` 在调用我们之前就把 `engine_destroying` 置了 true。
+    // 于是 `base.destroy()` 会直接 return，`raw.objectDestroy` 永远不执行，
+    // 请求引擎释放对象这件事从未发生——对象留在 ObjectDB 里，退出时报实例泄漏。
+    //
+    // `Object` 的 `destroy` 是无守卫的直通版本（class/Object.mixin.zig），
+    // 正好是这里需要的：由我们负责把引擎对象真正删掉。
+    Object.upcast(self.base).destroy();
     allocator.destroy(self);
 }
 
