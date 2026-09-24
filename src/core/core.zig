@@ -10,6 +10,7 @@ const std = @import("std");
 pub const version = "0.0.0";
 
 pub const clock = @import("clock.zig");
+pub const frame_queue = @import("frame_queue.zig");
 
 test "core 模块可以编译并被引用" {
     try std.testing.expect(version.len > 0);
