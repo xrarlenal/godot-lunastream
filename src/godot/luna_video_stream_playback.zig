@@ -40,6 +40,7 @@ const VideoFrame = core.backend.VideoFrame;
 const DecodeScheduler = core.decode_scheduler.DecodeScheduler;
 const StreamHandle = core.decode_scheduler.StreamHandle;
 const PushConstants = core.push_constants.Nv12PushConstants;
+const MediaClock = core.clock.MediaClock;
 const playback_state = core.playback_state;
 const StateMachine = playback_state.Machine;
 
@@ -95,6 +96,11 @@ stalls: u64 = 0,
 last_stats_ms: i64 = 0,
 /// 打开时用的路径副本（重连要用；调度器会再复制一份自己保管）。
 path_copy: ?[]u8 = null,
+
+/// 播放时钟（core 的 0001）。它解决的是**重连之后位置会倒退**这件事：重开的源 PTS
+/// 从头开始（实测会触发 core 的单调性告警），而 `reanchor` 只向前、不倒退，于是
+/// "切片连续"在重连时也成立——播放位置不会突然跳回 0。
+clock: MediaClock = MediaClock.init(0.0),
 
 // ---------------------------------------------------------------------------
 // 注册与生命周期（与 0003 / 0022 的写法一致）
@@ -173,6 +179,7 @@ pub fn load(self: *LunaVideoStreamPlayback, path: []const u8) bool {
     self.path_copy = self.allocator.dupe(u8, path) catch null;
     self.machine = StateMachine.init(.{});
     self.machine.beginOpen(nowMs());
+    self.clock = MediaClock.init(0.0);
     self.reportState();
 
     // 调度器：worker 池 + 有界帧队列（0007）。它的队列与回收环决定了导入侧的
@@ -276,6 +283,7 @@ pub fn _isPlaying(self: *LunaVideoStreamPlayback) bool {
 
 pub fn _setPaused(self: *LunaVideoStreamPlayback, paused: bool) void {
     self.paused = paused;
+    self.clock.setPaused(paused);
 }
 
 pub fn _isPaused(self: *LunaVideoStreamPlayback) bool {
@@ -287,7 +295,8 @@ pub fn _getLength(self: *LunaVideoStreamPlayback) f64 {
 }
 
 pub fn _getPlaybackPosition(self: *LunaVideoStreamPlayback) f64 {
-    return self.position_seconds;
+    // 位置以**时钟**为准，而不是最近一帧的 PTS——后者在重连时会跳回源的开头。
+    return self.clock.mediaTime();
 }
 
 /// 直播流没有 seek 语义；本地文件的选择性跳转交给愿意背这块的插件。
@@ -324,6 +333,8 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
     const scheduler = self.scheduler orelse return;
     const stream = self.stream orelse return;
     const now = nowMs();
+    // 按渲染 delta 推进时钟；收到帧时再用它的 PTS 向前对齐（reanchor 只向前）。
+    self.clock.advance(delta);
 
     const frame = scheduler.nextFrame(stream) orelse {
         // 这一轮没帧：交给状态机判断"是不是停滞后重连"，并把状态迁移报出去。
@@ -337,6 +348,7 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
     };
     defer frame.release();
     self.position_seconds = frame.pts_seconds;
+    _ = self.clock.reanchor(frame.pts_seconds);
     self.machine.onFrame(now);
     self.reportState();
 
@@ -360,7 +372,6 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
     self.frames_presented += 1;
     if (self.owner_stream) |owner| owner.emitFrameReady();
     self.pushStatsIfDue(now);
-    _ = delta;
 }
 
 /// 0019：状态迁移时把新状态发给流（流再发信号）。

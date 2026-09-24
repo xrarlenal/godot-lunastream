@@ -179,3 +179,26 @@ test "WallClockMs 默认值为零" {
     const w: WallClockMs = .{};
     try std.testing.expectEqual(0.0, w.ms);
 }
+
+test "重连场景：源的 PTS 从头开始，播放位置不倒退（0024）" {
+    var clock = MediaClock.init(0.0);
+
+    // 第一段：播放到 5 秒附近（每帧 40ms，模拟 25fps）。
+    var pts: f64 = 5.0;
+    while (pts < 5.1) : (pts += 0.04) {
+        clock.advance(0.04);
+        _ = clock.reanchor(pts);
+    }
+    const before_reconnect = clock.mediaTime();
+    try std.testing.expect(before_reconnect >= 5.0);
+
+    // 断流重连：新的源从 0 开始给 PTS。
+    // 这正是 0019 的重连路径上实测会发生的（core 的单调性守卫会告警）。
+    try std.testing.expect(!clock.reanchor(0.0)); // 回拨被忽略
+    try std.testing.expect(!clock.reanchor(0.04));
+    try std.testing.expect(clock.mediaTime() >= before_reconnect);
+
+    // 时钟继续按渲染 delta 走，于是画面恢复后位置继续向前，不会卡在旧值上。
+    clock.advance(0.04);
+    try std.testing.expect(clock.mediaTime() > before_reconnect);
+}

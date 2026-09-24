@@ -54,11 +54,17 @@ func _ready() -> void:
 	# 跑若干渲染帧：每一帧 VideoStreamPlayer 会调 playback._update，
 	# 里面走"取帧 → 导入 → 呈现 → 重指 Texture2DRD"。
 	var elapsed := 0
+	var last_position := -1.0
+	var position_backtracked := false
 	while elapsed < MAX_FRAMES:
 		await get_tree().process_frame
 		elapsed += 1
 		# 从流那边问计数（Godot 4.6 没有 get_stream_playback，所以诊断入口挂在流上）。
 		_frames = int(_stream.call("get_frames_presented"))
+		var pos := _player.stream_position
+		if pos < last_position - 0.001:
+			position_backtracked = true
+		last_position = maxf(last_position, pos)
 		if _frames >= TARGET_FRAMES:
 			break
 
@@ -69,6 +75,9 @@ func _ready() -> void:
 			"%dx%d" % [texture.get_width(), texture.get_height()])
 	_check("呈现的帧数在增长", _frames >= 1, "frames=%d（跑了 %d 帧）" % [_frames, elapsed])
 	_check("播放位置在推进", _player.stream_position > 0.0, str(_player.stream_position))
+	# 0024：位置由 core 的 MediaClock 供给（而不是"最近一帧的 PTS"），所以逐帧采样
+	# 必须单调不减——重连时源会把 PTS 从头开始，那时这条断言才是真被考验。
+	_check("播放位置逐帧单调不减", not position_backtracked, "last=%.3f" % last_position)
 	var last_error: String = _stream.call("get_last_error")
 	_check("没有报错", last_error.is_empty(), last_error)
 

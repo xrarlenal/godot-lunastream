@@ -32,7 +32,7 @@
 | 0021 | 打包、许可与发布产物 | 交付 | 打包/许可脚本与门槛已就位；**LGPL FFmpeg 已实测编成、许可门槛转绿**（见 `docs/licensing.md`） |
 | 0022 | 修 gdzig 类实例泄漏与 headless 导入崩溃 | Godot | 部分修复：我们自己的类不再泄漏、退出崩溃已修；**残余**是一小组 RD 辅助对象，已量化并定位到"少数调用点"（见 `docs/features/0022-gdzig-instance-leak.md`） |
 | 0023 | HDR 传输函数与色调映射（PQ / HLG / BT.2020→BT.709） | core | ✅ 已完成（13 项测试；着色器接线待呈现那一步） |
-| 0024 | 接上 MediaClock 与重连后的 reanchor | core+Godot | 待做（0001 里已有只向前的 reanchor；重连后源的 PTS 会从头开始，实测会触发单调性告警） |
+| 0024 | 接上 MediaClock 与重连后的 reanchor | core+Godot | ✅ 已完成（播放位置改由时钟供给；重连后 PTS 从头开始时位置不倒退） |
 
 ## 说明
 
