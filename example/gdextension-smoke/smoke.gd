@@ -23,22 +23,23 @@ func _ready() -> void:
 		return
 
 	_stream = ClassDB.instantiate(CLASS_NAME)
-	var stream := _stream
-	_check("类可实例化", stream != null, str(stream))
-	if stream == null:
+	# 注意：这里必须是成员变量，不能再用局部别名兜一层——局部变量会在
+	# _ready 因 await 挂起期间继续持有引用，把 0022 的延迟释放抵消掉。
+	_check("类可实例化", _stream != null, str(_stream))
+	if _stream == null:
 		_finish()
 		return
 
-	_check("继承了 VideoStream", stream is VideoStream, stream.get_class())
+	_check("继承了 VideoStream", _stream is VideoStream, _stream.get_class())
 
-	var ping: String = stream.call("ping")
+	var ping: String = _stream.call("ping")
 	_check("方法绑定可用", ping.begins_with("lunastream/"), ping)
 
-	stream.set("decoder", 2)
-	_check("枚举属性写入与回读", int(stream.get("decoder")) == 2, str(stream.get("decoder")))
+	_stream.set("decoder", 2)
+	_check("枚举属性写入与回读", int(_stream.get("decoder")) == 2, str(_stream.get("decoder")))
 
-	stream.set("decoder", 99)
-	_check("越界枚举值被忽略", int(stream.get("decoder")) == 2, str(stream.get("decoder")))
+	_stream.set("decoder", 99)
+	_check("越界枚举值被忽略", int(_stream.get("decoder")) == 2, str(_stream.get("decoder")))
 
 	_finish()
 

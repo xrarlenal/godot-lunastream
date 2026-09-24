@@ -95,3 +95,26 @@ pub fn _notification(self: *LunaVideoStream, what: i32, reversed: bool) void {
 - 泄漏的表现是"每个手动创建并释放的流实例泄漏一个对象"。对本插件最终的使用方式
   （每路流一个长生命周期实例）影响有限，但同样是必须修的——它出现在"插件是否可信"
   的第一印象里。
+
+## 进展与当前残余（更新）
+
+**已经修好的两处：**
+
+1. **根因**：在 `POSTINITIALIZE` 里安排一次 deferred 调用（`release_creator_ref`），
+   在引擎引用就位之后交还创建方那份。隔离验证：引用计数 **2 → 1**，`ping` 仍正常，
+   泄漏警告消失。
+2. **孤儿 StringName**：`StringName.fromLatin1` 的第二个参数是 `is_static`，字面量
+   必须传 `true`（`false` 等于声明"我自己负责析构"）。改后
+   `Orphan StringName: release_creator_ref` 消失。
+
+**仍未解决：** 自检脚本这一条路径上还剩一次 `ObjectDB instances leaked at exit`。
+已排除的假设：
+
+| 假设 | 实验 | 结论 |
+|---|---|---|
+| 自检脚本里的局部别名多持了一份引用 | 去掉 `var stream := _stream`，改用成员变量直连 | **仍泄漏，假设不成立** |
+| 创建回调链内部释放 | 在 `POSTINITIALIZE` 里直接 unref | 挂死，已证伪（见上） |
+
+关键对比：**隔离脚本（`instantiate` → 置空 → 等一帧 → 退出）是干净的，自检脚本不是。**
+两者差异只在自检脚本多做了几次调用（`call("ping")`、`set/get("decoder")`）。
+下一步就按剪枝法在这三次调用上做二分——这是纯脚本层面的实验，不需要改扩展。
