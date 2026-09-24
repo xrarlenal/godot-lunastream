@@ -73,6 +73,15 @@ pub fn register(r: *Registry) void {
     class.addMethod("emit_state_changed", .auto);
     class.addMethod("emit_frame_ready", .auto);
     class.addMethod("emit_stats_updated", .auto);
+    // 0019：把重连/停滞的可调参数暴露出来。**刻意用方法而不是属性**：gdzig 的属性
+    // 注册要求 getter/setter 命名严格配对（`prop` → `setProp` / `getProp`），
+    // 方法名是我们自己定的、语义更直白，也不会因为命名约定变化而静默失效。
+    class.addMethod("set_stall_timeout_ms", .auto);
+    class.addMethod("get_stall_timeout_ms", .auto);
+    class.addMethod("set_reconnect_max_attempts", .auto);
+    class.addMethod("get_reconnect_max_attempts", .auto);
+    class.addMethod("set_reconnect_backoff_max_ms", .auto);
+    class.addMethod("get_reconnect_backoff_max_ms", .auto);
     // 信号的名字来自**结构体名**（gdzig 用 casez 的 signal 规则转换），字段就是参数。
     class.addSignal(StateChanged);
     class.addSignal(FrameReady);
@@ -134,6 +143,41 @@ pub fn getStats(self: *LunaVideoStream) Dictionary {
 pub fn getTexture(self: *LunaVideoStream) ?*Texture2d {
     if (self.last_playback) |playback| return playback.getTexture();
     return null;
+}
+
+// ---------------------------------------------------------------------------
+// 0019 的可调参数（写进 core 状态机的 Policy）
+// ---------------------------------------------------------------------------
+
+pub fn setStallTimeoutMs(self: *LunaVideoStream, ms: i64) void {
+    if (self.last_playback) |playback| playback.machine.policy.stall_after_ms = ms;
+}
+
+pub fn getStallTimeoutMs(self: *LunaVideoStream) i64 {
+    if (self.last_playback) |playback| return playback.machine.policy.stall_after_ms;
+    return 2000;
+}
+
+pub fn setReconnectMaxAttempts(self: *LunaVideoStream, attempts: i64) void {
+    if (attempts < 0) return;
+    if (self.last_playback) |playback| {
+        playback.machine.policy.max_attempts = @intCast(attempts);
+    }
+}
+
+pub fn getReconnectMaxAttempts(self: *LunaVideoStream) i64 {
+    if (self.last_playback) |playback| return @intCast(playback.machine.policy.max_attempts);
+    return 8;
+}
+
+pub fn setReconnectBackoffMaxMs(self: *LunaVideoStream, ms: i64) void {
+    if (ms <= 0) return;
+    if (self.last_playback) |playback| playback.machine.policy.backoff_max_ms = ms;
+}
+
+pub fn getReconnectBackoffMaxMs(self: *LunaVideoStream) i64 {
+    if (self.last_playback) |playback| return playback.machine.policy.backoff_max_ms;
+    return 8000;
 }
 
 /// 最近一路流已经呈现的帧数；没有播放实例时是 0。

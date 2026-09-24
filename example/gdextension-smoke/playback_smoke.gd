@@ -86,6 +86,14 @@ func _ready() -> void:
 	_check("get_stats() 带回帧数与状态", int(stats.get("frames_presented", -1)) > 0 and int(stats.get("state", -1)) == 2, str(stats))
 	_check("stats 里有 cpu 路径计数", int(stats.get("frames_cpu", -1)) > 0, str(stats.get("frames_cpu", -1)))
 
+	# 0019：重连/停滞参数可调（写进 core 状态机的 Policy）。
+	_stream.call("set_stall_timeout_ms", 1234)
+	_stream.call("set_reconnect_max_attempts", 3)
+	_stream.call("set_reconnect_backoff_max_ms", 4321)
+	_check("停滞阈值可读回", int(_stream.call("get_stall_timeout_ms")) == 1234, str(_stream.call("get_stall_timeout_ms")))
+	_check("重连次数上限可读回", int(_stream.call("get_reconnect_max_attempts")) == 3, str(_stream.call("get_reconnect_max_attempts")))
+	_check("退避封顶可读回", int(_stream.call("get_reconnect_backoff_max_ms")) == 4321, str(_stream.call("get_reconnect_backoff_max_ms")))
+
 	# 0018：资源加载器——把工程内的 mp4 直接 load() 成一路视频源。
 	if ResourceLoader.exists("res://clip8.mp4"):
 		var loaded: Variant = load("res://clip8.mp4")
