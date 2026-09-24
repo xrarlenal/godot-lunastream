@@ -33,10 +33,11 @@ layout(push_constant, std430) uniform Params {
 	float gamut;
 	float tone_peak_nits;
 	float tone_white_nits;
-	float pad0;
+	float plane_mode;
 	float pad1;
 	float pad2;
 } params;
+
 
 // --- PQ（SMPTE ST 2084）：常数照 core/hdr.zig 写成有理数 -------------------
 const float PQ_M1 = 2610.0 / 16384.0;

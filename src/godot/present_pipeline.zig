@@ -178,17 +178,20 @@ pub const PresentPipeline = struct {
         if (surface.spec.width != self.width or surface.spec.height != self.height) {
             try self.resize(surface.spec.width, surface.spec.height);
         }
-        const pair = switch (surface.planes) {
-            .luma_chroma => |p| p,
-            // 平台路径若只给一块交织纹理，本步还没做那条分支（见文档的已知限制）。
+        const luma_rid: Rid, const chroma_rid: Rid = switch (surface.planes) {
+            .luma_chroma => |pair| .{ pair.luma, pair.chroma },
+            // 单块打包纹理这条分支**试过、已撤回**：实现（着色器采样 + 绑定 3）写完后
+            // 读回是**全黑**，而它没有生产者（平台导入器都给两块纹理），无法在预算内
+            // 定位（加输入纹理回读还会让 Metal 驱动 ABRT）。留着明确报错比留一个
+            // "不确定能不能跑"的分支强——证据写在 0018 的功能文档里。
             .interleaved_single => return Error.UnsupportedPlaneSet,
         };
 
         if (!self.uniform_set.isValid() or
-            self.cached_luma.getId() != pair.luma.getId() or
-            self.cached_chroma.getId() != pair.chroma.getId())
+            self.cached_luma.getId() != luma_rid.getId() or
+            self.cached_chroma.getId() != chroma_rid.getId())
         {
-            try self.rebuildUniformSet(pair.luma, pair.chroma);
+            try self.rebuildUniformSet(luma_rid, chroma_rid);
         }
 
         const list = self.rd.computeListBegin();
@@ -250,6 +253,7 @@ pub const PresentPipeline = struct {
         u_out.setUniformType(.uniform_type_image);
         u_out.setBinding(2);
         u_out.addId(self.output);
+
 
         var uniforms: Array = .init();
         defer uniforms.deinit();

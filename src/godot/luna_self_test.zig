@@ -591,6 +591,7 @@ fn checkPresentPipeline(self: *LunaSelfTest, report: *Report) void {
         return;
     };
     report.add(true, "HDR 档（PQ）的呈现没有报错", .{});
+
 }
 
 /// 把呈现输出读回来，与 core 的色彩层算出的期望值逐像素比对（必须在下一帧做，

@@ -49,8 +49,10 @@ pub const Nv12PushConstants = extern struct {
     tone_peak_nits: f32 = 1000.0,
     /// 色调映射：映射到 SDR 白点的输入亮度（nits）。
     tone_white_nits: f32 = 1000.0,
-    /// 补到 64 字节（Vulkan 要求推送常量大小是 16 的倍数）。
-    pad0: f32 = 0.0,
+    /// 平面的摆法：0 = 两块纹理（亮度 + 交织色度），1 = 单块打包纹理
+    /// （亮度在上、交织色度在下，总高 = 高度 × 1.5）。这个字段以前是补位用的
+    /// `pad0`——补位字段迟早会被用掉，所以 ABI 守卫才要盯着名字与顺序。
+    plane_mode: f32 = 0.0,
     pad1: f32 = 0.0,
     pad2: f32 = 0.0,
 
@@ -120,7 +122,7 @@ test "推送常量是 64 字节、字段按 4 字节排布（GPU 侧的 ABI 前�
     try std.testing.expectEqual(@as(usize, 40), @offsetOf(Nv12PushConstants, "gamut"));
     try std.testing.expectEqual(@as(usize, 44), @offsetOf(Nv12PushConstants, "tone_peak_nits"));
     try std.testing.expectEqual(@as(usize, 48), @offsetOf(Nv12PushConstants, "tone_white_nits"));
-    try std.testing.expectEqual(@as(usize, 52), @offsetOf(Nv12PushConstants, "pad0"));
+    try std.testing.expectEqual(@as(usize, 52), @offsetOf(Nv12PushConstants, "plane_mode"));
 }
 
 test "8 位视频范围 BT.709：常数就是标准值" {
