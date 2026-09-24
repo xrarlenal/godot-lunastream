@@ -22,8 +22,8 @@
 | 0011 | 10-bit 软解路径（`yuv420p10le` / `P010` 右对齐） | 解码 | ✅ 已完成 |
 | 0012 | 解码烟测工具（`zig build decode-smoke`，不需要 Godot） | 解码 | ✅ 已完成 |
 | 0013 | CPU 帧导入器与轮换纹理池 | 呈现 | ✅ 已完成 |
-| 0014 | 导入器运行时分发（平台 / CPU 二选一） | 呈现 | 进行中 |
-| 0015 | Metal 呈现导入器（macOS 零拷贝） | 呈现 | 待做 |
+| 0014 | 导入器运行时分发（平台 / CPU 二选一） | 呈现 | ✅ 已完成 |
+| 0015 | Metal 呈现导入器（macOS 零拷贝） | 呈现 | 进行中 |
 | 0016 | D3D12 呈现导入器（Windows 零拷贝） | 呈现 | 待做 |
 | 0017 | Vulkan dma-buf 导入器与随包 Vulkan Layer（Linux 零拷贝） | 呈现 | 待做 |
 | 0018 | `VideoStream` / `VideoStreamPlayback` / 资源加载器 | Godot | 待做 |
