@@ -1,0 +1,19 @@
+{
+    "file_format_version": "1.2.0",
+    "layer": {
+        "name": "VK_LAYER_LUNA_external_memory",
+        "type": "GLOBAL",
+        "library_path": "./libluna_ext_layer.so",
+        "api_version": "1.1.0",
+        "implementation_version": "1",
+        "description": "Injects Vulkan external-memory (dma-buf) extensions so Godot can import hardware-decoded surfaces",
+        "functions": {
+            "vkNegotiateLoaderLayerInterfaceVersion": "vkNegotiateLoaderLayerInterfaceVersion"
+        },
+        "instance_extensions": [],
+        "device_extensions": [],
+        "enable_environment": {
+            "LUNA_EXTERNAL_MEMORY_LAYER": "1"
+        }
+    }
+}
