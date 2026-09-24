@@ -9,6 +9,8 @@ const std = @import("std");
 /// 语义化版本，与仓库 tag 同步。
 pub const version = "0.0.0";
 
+pub const clock = @import("clock.zig");
+
 test "core 模块可以编译并被引用" {
     try std.testing.expect(version.len > 0);
 }
