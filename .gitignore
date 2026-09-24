@@ -32,3 +32,6 @@ example/gdextension-smoke/addons/lunastream/luna_layer/
 
 # 打包产物（tools/package-addon.sh 的输出）与 LGPL FFmpeg 的构建目录
 dist/
+
+# 播放烟测拷进示例工程的片源（构建产物）
+example/gdextension-smoke/clip*.mp4

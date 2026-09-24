@@ -161,30 +161,45 @@ Godot 4.6 **没有**暴露 `VideoStreamPlayer.get_stream_playback()`，所以诊
 退出时那条 `ObjectDB instances leaked at exit` 还在（0022）。本步没有碰它——它是
 独立条目，且**不影响播放正确性**（播放本身已经逐项验证过）。
 
-## 资源加载器：试过，暂时撤回（附证据）
+## 资源加载器：`load("res://clip.mp4")` 直接得到一路源（已完成）
 
-目标是让 `load("res://clip.mp4")` 直接得到一路 `LunaVideoStream`（PLAN 5.3 说的
-"能跑但不像 API" 那件事）。实现本身照源工程的 `native_video_resource_format_loader.zig`
-写完了（`_getRecognizedExtensions` / `_handlesType` / `_getResourceType` / `_load`），
-但在注册这一步撞墙，实测两条引擎报错：
+目标是 PLAN 5.3 说的那件事：别让使用者先 `ClassDB.instantiate` 再手工赋 `file`——
+那是"能跑但不像 API"。
+
+### 卡过一次，卡点值得记
+
+第一版照源工程的加载器写完（`_getRecognizedExtensions` / `_handlesType` /
+`_getResourceType` / `_load`），但在 `extension.register()` 里就把它交给引擎，实测
+两条报错：
 
 ```
 ERROR: Cannot get class 'LunaVideoResourceFormatLoader'.
 ERROR: Failed to retrieve non-existent singleton 'ResourceLoader'.
 ```
 
-也就是说：**在扩展注册的时机（场景级）拿不到 `ResourceLoader` 单例**，而类注册也没
-生效。源工程为此专门写了一个 `LoaderLifecycle`（按初始化级别挂钩、在合适的级别创建
-实例并 `add_resource_format_loader`）——说明这件事对时机有要求，不是随手在 `register()`
-里调一下就行。
+**两条报错是同一件事的两面**：`register()` 只是把类**排队**，真正的注册发生在
+gdzig 的 `Registry.enter(level)` 里（先提交类，再跑分级回调）；而我在排队阶段就把
+一个"类还没注册的对象"交给了引擎，同时那个时点 gdzig 也还没拿到 `ResourceLoader`
+单例（`globalGetSingleton` 返回空，调用点用 `.?` 硬解）。
 
-处置：**撤回**（而不是留一个会让扩展带错误启动的版本）。现在 `file = "rtsp://..."`
-与 `file = "res://..."` 两条路都仍然可用（直接赋值），只是少了"用 `load()` 拿资源"
-这一种写法。
+### 正确的做法（已实现）
 
-下一步要做的事：照源工程那样实现按级别的生命周期钩子，把加载器挂在
-`SERVERS` 级（`ResourceLoader` 单例那时已经存在），再在自检里加一条
-`ResourceLoader.exists("res://clip.mp4")` + `load()` 类型断言。
+走 gdzig 的**分级回调**：`registry.addCallbacks(LoaderLifecycle, ...)`，在它的
+`.scene` 回调里创建加载器实例并 `ResourceLoader.addResourceFormatLoader(loader.base)`。
+那个回调在"本级的类注册完成之后"才触发，两个问题一起消失。源工程用的也是这个模式。
+
+### 验证
+
+```
+PASS  load("res://clip8.mp4") 拿到 VideoStream  (res://clip8.mp4):<LunaVideoStream#…>
+PASS  加载出来的类型是我们的 LunaVideoStream
+PASS  加载出来的流带着 file
+```
+
+片源由构建步骤从 `.zig-cache/ffsw-selftest/clip8.mp4` 拷进工程一份（构建产物，
+已 gitignore）。识别的容器扩展名按"FFmpeg 能解封装 + 软解能出帧"列（mp4/mov/m4v/
+mkv/webm/ts/m2ts/mpg/mpeg/avi/flv/wmv 等）——**网络 URL 不走加载器**，`rtsp://` 这类
+由使用者直接设 `file`（这正是 Godot 对 `VideoStream.file` 的定义）。
 - **重连已接线**（0019）：状态机的退避窗口到期后，播放实现调调度器的
   `requestReopen`，由**持有租约的 worker**在自己的租约里执行 `close + open`——
   主线程绝不直接碰后端（会与正在解码的 worker 抢同一份 FFmpeg 上下文）。

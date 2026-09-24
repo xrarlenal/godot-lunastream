@@ -12,6 +12,7 @@ const Registry = godot.extension.Registry;
 const LunaVideoStream = @import("luna_video_stream.zig");
 const LunaSelfTest = @import("luna_self_test.zig");
 const LunaVideoStreamPlayback = @import("luna_video_stream_playback.zig");
+const LunaVideoResourceFormatLoader = @import("luna_video_resource_format_loader.zig");
 
 const builtin = @import("builtin");
 
@@ -35,10 +36,20 @@ pub fn register(r: *Registry) void {
     r.addModule(LunaVideoStream);
     r.addModule(LunaSelfTest);
     r.addModule(LunaVideoStreamPlayback);
+    r.addModule(LunaVideoResourceFormatLoader);
+
+    // 加载器交给引擎的时机**不能**在这里：类还没注册完（会报 Cannot get class），
+    // 那时 gdzig 也还没拿到 ResourceLoader 单例。走分级回调，在 .scene 级做。
+    r.addCallbacks(
+        LunaVideoResourceFormatLoader.LoaderLifecycle,
+        .{ .allocator = r.allocator },
+        .{},
+    );
 }
 
 pub fn unregister(r: *Registry) void {
     r.removeModule(LunaVideoStreamPlayback);
     r.removeModule(LunaSelfTest);
     r.removeModule(LunaVideoStream);
+    r.removeModule(LunaVideoResourceFormatLoader);
 }

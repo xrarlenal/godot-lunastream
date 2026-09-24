@@ -85,6 +85,17 @@ func _ready() -> void:
 	var stats: Dictionary = _stream.call("get_stats")
 	_check("get_stats() 带回帧数与状态", int(stats.get("frames_presented", -1)) > 0 and int(stats.get("state", -1)) == 2, str(stats))
 	_check("stats 里有 cpu 路径计数", int(stats.get("frames_cpu", -1)) > 0, str(stats.get("frames_cpu", -1)))
+
+	# 0018：资源加载器——把工程内的 mp4 直接 load() 成一路视频源。
+	if ResourceLoader.exists("res://clip8.mp4"):
+		var loaded: Variant = load("res://clip8.mp4")
+		var is_stream := loaded != null and loaded is VideoStream
+		_check("load(\"res://clip8.mp4\") 拿到 VideoStream", is_stream, str(loaded))
+		if is_stream:
+			_check("加载出来的类型是我们的 LunaVideoStream", loaded.get_class() == "LunaVideoStream", loaded.get_class())
+			_check("加载出来的流带着 file", String(loaded.get("file")).contains("clip8.mp4"), str(loaded.get("file")))
+	else:
+		_check("工程里有 clip8.mp4（构建步骤应把它拷进来）", false, "res://clip8.mp4")
 	_finish()
 
 

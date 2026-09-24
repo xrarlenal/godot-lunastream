@@ -438,6 +438,14 @@ pub fn build(b: *Build) !void {
     // 片源路径用 `--` 传给脚本（Godot 的 OS.get_cmdline_user_args()），
     // 复用 ffsw-selftest 生成的那个片源。
     const playback_step = b.step("godot-playback-smoke", "播放烟测：真的播一段流（需要带渲染上下文的 Godot）");
+
+    // 把片源拷进工程一份，好让自检能验资源加载器（load("res://clip8.mp4")）。
+    // 拷贝是构建产物，已加进 .gitignore。
+    const copy_clip = b.addSystemCommand(&.{
+        "cp", "-f", clip8, "example/gdextension-smoke/clip8.mp4",
+    });
+    copy_clip.step.dependOn(&gen8.step);
+
     const run_playback = b.addSystemCommand(&.{
         godot_bin,
         "--path",
@@ -451,5 +459,6 @@ pub fn build(b: *Build) !void {
     run_playback.stdio = .inherit;
     run_playback.step.dependOn(&install.step);
     run_playback.step.dependOn(&gen8.step);
+    run_playback.step.dependOn(&copy_clip.step);
     playback_step.dependOn(&run_playback.step);
 }
