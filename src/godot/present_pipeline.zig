@@ -159,8 +159,25 @@ pub const PresentPipeline = struct {
         return self.output;
     }
 
+    /// 换尺寸：重建输出纹理（RID 会变，所以引用它的 Texture2DRD 必须重新指一次）。
+    fn resize(self: *PresentPipeline, width: u32, height: u32) Error!void {
+        if (self.uniform_set.isValid()) {
+            self.rd.freeRid(self.uniform_set);
+            self.uniform_set = .init();
+        }
+        if (self.output.isValid()) self.rd.freeRid(self.output);
+        self.width = width;
+        self.height = height;
+        self.output = self.createOutputTexture() catch return Error.TextureCreateFailed;
+    }
+
     /// 跑一遍 compute，把这一帧写进输出纹理，返回输出纹理 RID（稳定）。
     pub fn present(self: *PresentPipeline, surface: Surface, pc: PushConstants) Error!Rid {
+        // 分辨率变了就重建：输出纹理的尺寸在创建时定死，沿用旧尺寸写新尺寸的帧只会
+        // 得到一块被裁掉或拉伸的画面。真实场景是源换档（摄像头切分辨率、重连到另一路）。
+        if (surface.spec.width != self.width or surface.spec.height != self.height) {
+            try self.resize(surface.spec.width, surface.spec.height);
+        }
         const pair = switch (surface.planes) {
             .luma_chroma => |p| p,
             // 平台路径若只给一块交织纹理，本步还没做那条分支（见文档的已知限制）。

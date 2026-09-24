@@ -492,6 +492,51 @@ fn checkPresentPipeline(self: *LunaSelfTest, report: *Report) void {
         .{},
     );
     report.add(pipeline.presents == 2, "派发计数 {d}", .{pipeline.presents});
+
+    // 分辨率变化：换一个尺寸再呈现一次。输出纹理的尺寸在创建时定死，所以管线必须
+    // 重建它——否则新尺寸的帧会被裁掉或拉伸。判据是"输出 RID 变了、管线尺寸跟上了"。
+    const bigger: Spec = .{ .width = 48, .height = 32, .bit_depth = 8 };
+    const bigger_luma = self.allocator.alloc(u8, bigger.lumaBytes()) catch return;
+    const bigger_chroma = self.allocator.alloc(u8, bigger.chromaBytes()) catch return;
+    defer {
+        self.allocator.free(bigger_luma);
+        self.allocator.free(bigger_chroma);
+    }
+    @memset(bigger_luma, 100);
+    @memset(bigger_chroma, 128);
+    const bigger_planes: CpuPlanes = .{
+        .y = bigger_luma.ptr,
+        .uv = bigger_chroma.ptr,
+        .y_stride = bigger.lumaRowBytes(),
+        .uv_stride = bigger.chromaRowBytes(),
+        .bit_depth = 8,
+    };
+    const bigger_surface = self.importer.import(bigger, bigger_planes) catch |err| {
+        report.add(false, "换分辨率用例：导入（{s}）", .{@errorName(err)});
+        return;
+    };
+    defer bigger_surface.release();
+
+    const before_rid = pipeline.outputTexture();
+    const resized_output = pipeline.present(bigger_surface, pc) catch |err| {
+        report.add(false, "换分辨率用例：present（{s}）", .{@errorName(err)});
+        return;
+    };
+    report.add(
+        resized_output.getId() != before_rid.getId(),
+        "换分辨率后输出纹理被重建（RID 变了）",
+        .{},
+    );
+    report.add(
+        pipeline.width == bigger.width and pipeline.height == bigger.height,
+        "管线尺寸跟上新分辨率（{d}x{d}）",
+        .{ pipeline.width, pipeline.height },
+    );
+
+    // 把现场恢复成原尺寸那一帧：逐像素回读在下一帧做，读的是输出纹理的**最终**内容。
+    // 少了这一步，回读拿到的是新尺寸那帧，已有的那条亮度比对会因为"画面完全变了"而红
+    //（实测：最大偏差 98/255）。
+    _ = pipeline.present(self.present_surface, pc) catch {};
 }
 
 /// 把呈现输出读回来，与 core 的色彩层算出的期望值逐像素比对（必须在下一帧做，

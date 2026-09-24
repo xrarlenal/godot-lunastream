@@ -351,7 +351,12 @@ pub fn _update(self: *LunaVideoStreamPlayback, delta: f64) void {
         frame.color.range,
         @intCast(surface.raw_code_shift),
     );
-    _ = pipeline.present(surface, pc) catch return;
+    const output = pipeline.present(surface, pc) catch return;
+    // 分辨率变化会让呈现管线重建输出纹理（RID 变），所以每次对齐一次——
+    // setTextureRdRid 很轻，而漏了这一步的表现是"换了分辨率之后画面不再更新"。
+    if (self.texture) |texture| {
+        if (texture.getTextureRdRid().getId() != output.getId()) texture.setTextureRdRid(output);
+    }
     self.frames_presented += 1;
     if (self.owner_stream) |owner| owner.emitFrameReady();
     self.pushStatsIfDue(now);
