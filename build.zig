@@ -261,6 +261,38 @@ pub fn build(b: *Build) !void {
             .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
         });
         ext_mod.linkSystemLibrary("dl", .{});
+
+        // 随包的 Vulkan Layer（0017）：Godot 自己的 Vulkan 后端不在 vkCreateDevice
+        // 上启用 dma-buf 需要的那些设备扩展，插件从外部又插不进手，所以只能随包发一个
+        // 标准 Layer 去补这一步。产物与清单必须同目录（清单里的 library_path 是相对
+        // 自己的），装到扩展目录下的 luna_layer/——vulkan_layer_setup.zig 就是按这个
+        // 相对位置在运行时找它的。
+        const layer_mod = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        });
+        layer_mod.addCSourceFile(.{
+            .file = b.path("src/vulkan_layer/luna_ext_layer.c"),
+            .flags = &.{ "-std=c11", "-fno-sanitize=undefined" },
+        });
+        layer_mod.addIncludePath(.{ .cwd_relative = vulkan_include });
+        layer_mod.linkSystemLibrary("dl", .{});
+
+        const layer = b.addLibrary(.{
+            .name = "luna_ext_layer",
+            .root_module = layer_mod,
+            .linkage = .dynamic,
+        });
+        const layer_dir = "../example/gdextension-smoke/addons/lunastream/luna_layer";
+        b.default_step.dependOn(&b.addInstallArtifact(layer, .{
+            .dest_dir = .{ .override = .{ .custom = layer_dir } },
+        }).step);
+        b.default_step.dependOn(&b.addInstallFileWithDir(
+            b.path("src/vulkan_layer/luna_ext_layer.json"),
+            .{ .custom = layer_dir },
+            "luna_ext_layer.json",
+        ).step);
     }
 
     const extension = gdzig.addExtension(b, .{

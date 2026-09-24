@@ -97,10 +97,21 @@ macOS 那两步（0013 CPU 导入器、0015 Metal 导入器）**没有**放宽�
 
 ### 还没做完的
 
-- **随包 Vulkan Layer 的产物接线**：`luna_ext_layer.c` 要单独编成 `.so`，连同
-  `luna_ext_layer.json` 装到扩展能找得到的位置（源工程用的是 `$ORIGIN/libs/linux64`
-  rpath），`vulkan_layer_setup.zig` 才找得到它。本步没有动它，因为它在 macOS 上既不能
-  编也不该装。
+- **真机运行**：见下表。
+
+### 已经做完的（层产物接线）
+
+`luna_ext_layer.c` 单独编成 `libluna_ext_layer.so`，与 `luna_ext_layer.json` 一起装到
+`addons/lunastream/luna_layer/`——`vulkan_layer_setup.zig` 在运行时就是按扩展目录下的
+这个相对位置找它们的（清单里的 `library_path` 是相对清单自己的，所以这一对必须同目录）。
+
+**一个必须记下来的前提**：Layer 里那两份 `vk_*_dispatch_table*.h` 是**按某版 Vulkan 头
+生成的**，所以它们挑头文件版本。实测本机的 `/usr/local/include/vulkan`（较旧的
+MoltenVK SDK）编不过（`unknown type name 'PFN_vkGetPhysicalDeviceDescriptorSizeEXT'`
+等），Khronos 的 Vulkan-Headers **v1.4.309** 也仍差几个新扩展类型，最后用
+Vulkan-Headers **main** 才过。结论：这一步要按目标机器的 Vulkan 版本准备头文件
+（`-Dvulkan-include=<dir>`），版本不够新就得用生成脚本重算这两份分发表——源工程的
+`tools/` 里就是干这件事的。
 - **接缝适配层**：`platform_surface.PlaneTextures/ImportResult` ↔ 本仓库 0014 的
   `Surface/Error` 的那一层映射（约二十行，含四种失败的对应关系）。
 - **真机运行**：见下表。
