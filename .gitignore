@@ -29,3 +29,6 @@ example/gdextension-smoke/addons/lunastream/luna_layer/
 .vscode/
 .idea/
 .zed/
+
+# 打包产物（tools/package-addon.sh 的输出）与 LGPL FFmpeg 的构建目录
+dist/

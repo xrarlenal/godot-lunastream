@@ -29,7 +29,7 @@
 | 0018 | `VideoStream` / `VideoStreamPlayback` / 资源加载器 | Godot | 进行中：播放已端到端验证；**资源加载器**因注册时机撞墙已撤回（见文档）、单块交织纹理分支与分辨率变化重建待做 |
 | 0019 | 信号与重连状态机（把 GDScript 里那 150 行搬进扩展） | Godot | 信号、状态上报与统计已完成并验证；**重连动作与参数属性待做**（跨线程重开需调度器配合） |
 | 0020 | 纹理直给（`stream.texture`） | Godot | ✅ 已完成（`stream.get_texture()`，自检断言与播放器拿到的纹理同一块） |
-| 0021 | 打包、许可与发布产物 | 交付 | 待做 |
+| 0021 | 打包、许可与发布产物 | 交付 | 打包/许可脚本与门槛已就位；**LGPL FFmpeg 已实测编成、许可门槛转绿**（见 `docs/licensing.md`） |
 | 0022 | 修 gdzig 类实例泄漏与 headless 导入崩溃 | Godot | 已定位，未修复（见 `docs/features/0022-gdzig-instance-leak.md`） |
 | 0023 | HDR 传输函数与色调映射（PQ / HLG / BT.2020→BT.709） | core | ✅ 已完成（13 项测试；着色器接线待呈现那一步） |
 

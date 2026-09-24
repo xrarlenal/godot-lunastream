@@ -1,0 +1,53 @@
+name: CI
+
+# 门槛分两档：
+#   1. 任何 runner 都能跑的（core 单测、ffsw 端到端自检、解码烟测）；
+#   2. 需要**带渲染上下文**的 Godot 的（导入器自检、播放烟测）——那两步要有显示环境，
+#      在无头 runner 上会失败（headless 下连 RenderingDevice 都没有），所以先只跑第 1 档。
+#
+# 这一档已经覆盖了"逻辑对不对"的绝大部分：core 154 项 + 与 ffmpeg 的逐字节比对 +
+# 解码后端适配器的端到端烟测。
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装工具链
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ffmpeg
+          # Zig 版本必须精确（gdzig 的绑定生成与 0.16 绑定）
+          curl -L -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          tar xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+
+      - name: core 单测 + ABI 守卫
+        run: zig build test --summary all
+
+      - name: ffsw 端到端自检（含与 ffmpeg 的逐字节比对）
+        run: zig build ffsw-selftest
+
+      - name: 解码后端适配器烟测（不需要 Godot）
+        run: zig build ffsw-backend-smoke
+
+      - name: 解码烟测
+        run: zig build decode-smoke
+
+  licenses:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: 许可门槛（发现 GPL 依赖即失败）
+        run: |
+          # 用系统 FFmpeg 的头/库做一次构建再打包；GPL 组件会被 check-licenses 拦下。
+          curl -L -o zig.tar.xz https://ziglang.org/download/0.16.0/zig-x86_64-linux-0.16.0.tar.xz
+          tar xf zig.tar.xz
+          echo "$PWD/zig-x86_64-linux-0.16.0" >> "$GITHUB_PATH"
+          zig build -Dffmpeg-prefix=/usr -Dtarget=x86_64-linux-gnu
+          FFMPEG_PREFIX=/usr tools/package-addon.sh
