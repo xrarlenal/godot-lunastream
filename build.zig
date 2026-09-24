@@ -36,6 +36,83 @@ pub fn build(b: *Build) !void {
     const test_step = b.step("test", "运行 core 单元测试（不需要 Godot）");
     test_step.dependOn(&b.addRunArtifact(core_tests).step);
 
+    // --- ffsw shim 的 C ABI 标签守卫 ---
+    // 只 `@embedFile` 读头文件文本再与 core 枚举比对，因此同样不需要 FFmpeg、
+    // 不需要 Godot，放在 `test` 步骤里对任何机器都成立。
+    const ffsw_abi_mod = b.createModule(.{
+        .root_source_file = b.path("src/ffsw/ffsw_shim_abi_test.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{.{ .name = "core", .module = core_mod }},
+    });
+    const ffsw_abi_tests = b.addTest(.{ .root_module = ffsw_abi_mod });
+    test_step.dependOn(&b.addRunArtifact(ffsw_abi_tests).step);
+
+    // --- ffsw shim：用真实 FFmpeg 编译，并跑端到端解码自检 ---
+    //
+    // 刻意与 `test` 分开：这一步需要 FFmpeg 的开发包（头文件 + 库）与 ffmpeg
+    // 命令行（生成测试片源、产出对照用的 NV12），因此不属于"任何机器都能跑"
+    // 的那一类。它换来的是这个 shim 最硬的证据：自检把**整条流**写成原始 NV12，
+    // 与 ffmpeg 自己解的同一份逐字节比对。
+    const ffmpeg_prefix = b.option([]const u8, "ffmpeg-prefix", "FFmpeg 安装前缀（头文件在 <prefix>/include，库在 <prefix>/lib）") orelse "/opt/homebrew";
+    const ffsw_step = b.step("ffsw-selftest", "编译 ffsw shim 并跑端到端解码自检（需要 FFmpeg）");
+
+    const ffsw_exe = b.addExecutable(.{
+        .name = "ffsw_selftest",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    ffsw_exe.root_module.addCSourceFiles(.{
+        .files = &.{ "src/ffsw/ffsw_shim.c", "src/ffsw/ffsw_selftest.c" },
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
+    });
+    ffsw_exe.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "include" }) });
+    ffsw_exe.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "lib" }) });
+    for ([_][]const u8{ "avformat", "avcodec", "avutil", "swscale" }) |lib| {
+        ffsw_exe.root_module.linkSystemLibrary(lib, .{});
+    }
+
+    const ffsw_work = b.pathJoin(&.{ b.cache_root.path orelse ".zig-cache", "ffsw-selftest" });
+    const ffsw_clip = b.pathJoin(&.{ ffsw_work, "clip.mp4" });
+    const ffsw_dump = b.pathJoin(&.{ ffsw_work, "shim_nv12.raw" });
+    const ffsw_ref = b.pathJoin(&.{ ffsw_work, "ffmpeg_nv12.raw" });
+
+    const ffsw_mkdir = b.addSystemCommand(&.{ "mkdir", "-p", ffsw_work });
+    const ffsw_gen = b.addSystemCommand(&.{
+        "ffmpeg", "-y", "-v", "error",
+        "-f",    "lavfi",
+        "-i",    "testsrc=size=320x240:rate=25:duration=2",
+        "-c:v",  "mpeg4",
+        "-q:v",  "3",
+        ffsw_clip,
+    });
+    ffsw_gen.step.dependOn(&ffsw_mkdir.step);
+
+    const ffsw_run = b.addRunArtifact(ffsw_exe);
+    ffsw_run.stdio = .inherit;
+    ffsw_run.addArg(ffsw_clip);
+    ffsw_run.addArg("--dump");
+    ffsw_run.addArg(ffsw_dump);
+    ffsw_run.step.dependOn(&ffsw_gen.step);
+
+    // 对照：同样的片源、同样的目标格式，交给 ffmpeg 自己解一遍。
+    const ffsw_reference = b.addSystemCommand(&.{
+        "ffmpeg", "-y", "-v", "error",
+        "-i",     ffsw_clip,
+        "-pix_fmt", "nv12",
+        "-fps_mode", "passthrough",
+        "-f",         "rawvideo",
+        ffsw_ref,
+    });
+    ffsw_reference.step.dependOn(&ffsw_run.step);
+
+    const ffsw_cmp = b.addSystemCommand(&.{ "cmp", ffsw_dump, ffsw_ref });
+    ffsw_cmp.step.dependOn(&ffsw_reference.step);
+    ffsw_step.dependOn(&ffsw_cmp.step);
+
     // --- GDExtension：gdzig 绑定 + 扩展入口 ---
     const gdzig_dep = if (opt_godot_path) |godot_path| b.dependency("gdzig", .{
         .target = target,

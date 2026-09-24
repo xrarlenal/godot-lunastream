@@ -19,6 +19,7 @@
 #define LUNASTREAM_FFSW_SHIM_H
 
 #include <stddef.h>
+#include <stdint.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -41,8 +42,10 @@ enum {
 enum {
 	NV_FFSW_TRANSFER_UNSPECIFIED = 0,
 	NV_FFSW_TRANSFER_BT709 = 1,
-	NV_FFSW_TRANSFER_PQ = 2,
-	NV_FFSW_TRANSFER_HLG = 3,
+	NV_FFSW_TRANSFER_GAMMA22 = 2,
+	NV_FFSW_TRANSFER_GAMMA28 = 3,
+	NV_FFSW_TRANSFER_PQ = 4,
+	NV_FFSW_TRANSFER_HLG = 5,
 };
 enum {
 	NV_FFSW_RANGE_VIDEO = 0,
@@ -67,6 +70,19 @@ typedef enum {
 	NV_FFSW_NONE = 0,
 	NV_FFSW_OK = 1,
 } nv_ffsw_result;
+
+// 内部槽位环的容量。依据是 core 的表面数量公式
+// `requiredPoolDepth(队列可用槽位, frame_latency) = 队列 + 1 + 回收环`：
+//
+//   DecodeAheadQueue 可用槽位 = 8 - 1 = 7
+//   正在转换/呈现的 1 帧
+//   回收环（呈现后再停 N 帧）取上限 4
+//   → 7 + 1 + 4 = 12
+//
+// 取 12 是为了让**正确归还帧的消费者不会撞到上限**：槽位耗尽返回 NONE，
+// 但只要有消费者忘了调 nv_ffsw_frame_release，环就会枯竭并让这条流停帧——
+// 这是刻意的，它把"忘了归还"变成可复现的现象，而不是默默泄漏。
+#define NV_FFSW_SLOT_COUNT 12
 
 // 不透明句柄：nv_ffsw_create 创建，nv_ffsw_destroy 释放。
 typedef struct nv_ffsw_backend nv_ffsw_backend;
@@ -120,6 +136,14 @@ void nv_ffsw_destroy(nv_ffsw_backend *handle);
 // 打开源。out_info 可为 NULL。
 nv_ffsw_result nv_ffsw_open(nv_ffsw_backend *handle, const char *url_or_path, nv_ffsw_open_info *out_info);
 
+// 网络连接/读取超时（微秒），默认 5 000 000（5 秒）。必须在 nv_ffsw_open 之前
+// 调用；传 0 表示交回 FFmpeg 的默认行为（可能永久阻塞）。
+//
+// 这个旋钮不是"调优项"而是"能不能收场"：实测把 UDP 推流停掉之后，没有超时的
+// av_read_frame 会让解码线程一直挂着不返回。有超时之后，源死掉会变成一次
+// 可上报的读错误，而不是一个不动的进程。
+void nv_ffsw_set_io_timeout_us(nv_ffsw_backend *handle, int64_t microseconds);
+
 // 关闭当前源但保留句柄（重新 open 前调用）。可重复调用。
 void nv_ffsw_close(nv_ffsw_backend *handle);
 
@@ -127,6 +151,10 @@ double nv_ffsw_duration_seconds(nv_ffsw_backend *handle);
 int nv_ffsw_video_width(nv_ffsw_backend *handle);
 int nv_ffsw_video_height(nv_ffsw_backend *handle);
 nv_ffsw_colorimetry nv_ffsw_colorimetry_of(nv_ffsw_backend *handle);
+
+// 到目前为止被丢掉的坏包数。实时网络源上非零是正常的（UDP 丢包、TS 拼接
+// 错位）；它只做观测，不代表流已经坏了。
+long long nv_ffsw_damaged_packet_count(nv_ffsw_backend *handle);
 
 // 取下一帧。OK / NONE（结束或暂无帧）/ FAIL（错误）。
 // 槽位耗尽时返回 NONE，调度器会重试——与硬解后端语义一致。

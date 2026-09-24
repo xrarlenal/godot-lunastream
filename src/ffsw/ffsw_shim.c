@@ -1,36 +1,97 @@
 // -----------------------------------------------------------------------
 // ffsw_shim.c — FFmpeg 解封装 + 软件解码的 C 实现。
 //
-// 本文件分两步落地（0010）：
+// 本文件分步落地（0010）：
 //   [x] 句柄生命周期、打开源、读取流信息与色域标签
-//   [ ] 解码与打包 CPU NV12（含 10-bit 分支）—— 下一步
+//   [x] 解码循环与 CPU NV12 打包（8-bit）
+//   [ ] 10-bit（yuv420p10le / P010 右对齐）—— 0011
 //
 // 刻意先做前半：打开源这一步要走真实的 libavformat ABI，能不能编译、能不能
 // 从真实源里读出宽高/帧率/色域，是后半个功能的前提。先在真实头文件上编译
 // 通过，再往里填解码。
+//
+// 解码这一段只做"把解码器的输出重新打包成 NV12"，**不做色域换算**：色域矩阵、
+// 码值范围、位深对齐由 core 的色彩层（0006）与共享 GLSL compute 负责，硬解与
+// 软解两条路共用同一份。这里多做一步换算就等于让两条路各有一套颜色。
 // -----------------------------------------------------------------------
 #include "ffsw_shim.h"
 
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/rational.h>
+#include <libswscale/swscale.h>
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+// 一个 CPU NV12 槽位。y 与 uv 两块分别紧凑分配（无行填充），跨帧复用：
+// 稳定态下取帧与归还都不分配内存。
+typedef struct {
+	unsigned char *y;
+	unsigned char *uv;
+	size_t y_cap;
+	size_t uv_cap;
+	int in_use;
+	int width;
+	int height;
+	int uv_row; // 交织 CbCr 平面的一行字节数（偶数宽度下等于 width）
+} nv_ffsw_slot;
+
 struct nv_ffsw_backend {
 	AVFormatContext *fmt;
 	AVCodecContext *dec;
+	AVPacket *pkt;
+	AVFrame *frame;
+	struct SwsContext *sws;
+	enum AVPixelFormat sws_src_fmt;
+	int sws_src_w;
+	int sws_src_h;
+
 	int video_stream_index;
+
+	// 解码状态机：读到流尾 → 送 flush 哨兵（draining）→ 排空（eof）。
+	int draining;
+	int eof;
+	// 手上有一个包还没能送进解码器（解码器输入满）。它必须留着下次再送，
+	// 否则那个包里的帧就永远丢了。
+	int pkt_pending;
+	int pkt_is_flush;
+	// 已经解出来、只是上一轮没拿到槽位的那一帧。留着它，槽位耗尽的 NONE
+	// 才是纯背压（可重试），而不是丢帧。
+	int frame_pending;
+
+	// 读取阶段遇到的硬错误（网络超时等）。0 = 没有。
+	//
+	// 它与"读到流尾"必须分开：文件读完是干净的 NONE，源死掉是 FAIL——
+	// 后者要让调用方去重开（0008 的重连状态机就是为这件事存在的）。
+	int stream_error;
+	int64_t io_timeout_us;
+
+	// 被丢掉的坏包数。实时网络上它是常态（UDP 丢包、拼接错位），所以丢一个
+	// 包绝不能变成"整条流失败"——但也不能装作没发生，因此计数待查。
+	long long damaged_packets;
 
 	int width;
 	int height;
+	// 源没给时间戳时的兜底帧间隔（秒），由帧率推得。
+	double fallback_interval;
 	double duration_seconds;
 	nv_ffsw_colorimetry color;
 
+	nv_ffsw_slot slots[NV_FFSW_SLOT_COUNT];
+	int slot_cursor;
+
+	long long frames_out;
+	double last_pts;
+	int have_last_pts;
+
 	char last_error[256];
 };
+
+// 流结束时的收场。定义在文件末尾，但解码路径的错误分支要用到它。
+static nv_ffsw_result report_end(nv_ffsw_backend *handle);
 
 static void set_error(nv_ffsw_backend *handle, const char *what) {
 	if (handle == NULL) return;
@@ -72,6 +133,10 @@ static int map_transfer(enum AVColorTransferCharacteristic tr) {
 	switch (tr) {
 	case AVCOL_TRC_BT709:
 		return NV_FFSW_TRANSFER_BT709;
+	case AVCOL_TRC_GAMMA22:
+		return NV_FFSW_TRANSFER_GAMMA22;
+	case AVCOL_TRC_GAMMA28:
+		return NV_FFSW_TRANSFER_GAMMA28;
 	case AVCOL_TRC_SMPTE2084:
 		return NV_FFSW_TRANSFER_PQ;
 	case AVCOL_TRC_ARIB_STD_B67:
@@ -107,23 +172,292 @@ static int bit_depth_of(enum AVPixelFormat fmt) {
 	return desc->comp[0].depth > 8 ? 10 : 8;
 }
 
+// --- 槽位环 ---------------------------------------------------------------
+
+// 取一个空槽位：从游标处轮转扫描，取不到返回 NULL（调用方如实回 NONE）。
+// 轮转而不是固定复用 0 号槽，是为了让"还没归还"的几块缓冲自然错开，
+// 免得一块缓冲被反复改写、把消费者手上那份踩掉。
+static nv_ffsw_slot *slot_acquire(nv_ffsw_backend *handle) {
+	for (int i = 0; i < NV_FFSW_SLOT_COUNT; i++) {
+		const int idx = (handle->slot_cursor + i) % NV_FFSW_SLOT_COUNT;
+		if (!handle->slots[idx].in_use) {
+			handle->slot_cursor = (idx + 1) % NV_FFSW_SLOT_COUNT;
+			handle->slots[idx].in_use = 1;
+			return &handle->slots[idx];
+		}
+	}
+	return NULL;
+}
+
+// 归还槽位。幂等：重复归还是空操作，不会把别人正在写的槽位抢回来。
+static void slot_release(nv_ffsw_slot *slot) {
+	if (slot == NULL) return;
+	slot->in_use = 0;
+}
+
+// 让槽位装得下 w x h 的 NV12。跨帧复用，尺寸不变时不分配——稳定态下
+// 取帧与归还都不碰堆。
+static int slot_reserve(nv_ffsw_slot *slot, int w, int h) {
+	const size_t y_size = (size_t)w * (size_t)h;
+	// 交织 CbCr 平面：半分辨率、每像素对 2 字节，所以一行 ((w+1)/2)*2 字节
+	// ——偶数宽度下正好等于 w（与头文件里"stride == width"的承诺一致）。
+	const int uv_row = ((w + 1) / 2) * 2;
+	const size_t uv_size = (size_t)uv_row * (size_t)((h + 1) / 2);
+
+	if (slot->y_cap < y_size) {
+		unsigned char *grown = realloc(slot->y, y_size);
+		if (grown == NULL) return -1;
+		slot->y = grown;
+		slot->y_cap = y_size;
+	}
+	if (slot->uv_cap < uv_size) {
+		unsigned char *grown = realloc(slot->uv, uv_size);
+		if (grown == NULL) return -1;
+		slot->uv = grown;
+		slot->uv_cap = uv_size;
+	}
+	slot->width = w;
+	slot->height = h;
+	slot->uv_row = uv_row;
+	return 0;
+}
+
+// --- 解码器 ---------------------------------------------------------------
+
+static int open_decoder(nv_ffsw_backend *handle, const AVStream *stream) {
+	const AVCodec *codec = avcodec_find_decoder(stream->codecpar->codec_id);
+	if (codec == NULL) {
+		set_error(handle, "no decoder for this codec");
+		return -1;
+	}
+	handle->dec = avcodec_alloc_context3(codec);
+	if (handle->dec == NULL) {
+		set_error(handle, "avcodec_alloc_context3 failed");
+		return -1;
+	}
+	if (avcodec_parameters_to_context(handle->dec, stream->codecpar) < 0) {
+		set_error(handle, "avcodec_parameters_to_context failed");
+		return -1;
+	}
+	// 帧时间戳按流的时间基给；不设它，best_effort_timestamp 的换算就是错的。
+	handle->dec->pkt_timebase = stream->time_base;
+	// 一路流一个解码器，多路并行已经由 core 的 worker 池承担（每路流一个
+	// worker）。这里再开解码器内部线程等于与 worker 池抢核。
+	handle->dec->thread_count = 1;
+	if (avcodec_open2(handle->dec, codec, NULL) < 0) {
+		set_error(handle, "avcodec_open2 failed");
+		return -1;
+	}
+	return 0;
+}
+
+// 给解码器喂输入。返回 1 = 有进展（可以接着 receive）、0 = 输入已经到底、
+// -1 = 硬错误。
+static int feed_decoder(nv_ffsw_backend *handle) {
+	for (;;) {
+		if (!handle->pkt_pending) {
+			if (handle->draining) return 0; // 哨兵已送过，解码器不再要输入
+			const int r = av_read_frame(handle->fmt, handle->pkt);
+			if (r < 0) {
+				// 流尾与读错误（超时等）都要先把解码器排空——它缓冲里可能还有
+				// 解好的帧，直接判失败会把那几帧丢掉。但两者**分开记账**：
+				// 文件读完是干净的结束，源中途死掉是要重开的失败。
+				if (r != AVERROR_EOF) handle->stream_error = r;
+				handle->pkt_is_flush = 1;
+				handle->pkt_pending = 1;
+			} else if (handle->pkt->stream_index != handle->video_stream_index) {
+				av_packet_unref(handle->pkt); // 只解视频，别的流直接放掉
+				continue;
+			} else {
+				handle->pkt_is_flush = 0;
+				handle->pkt_pending = 1;
+			}
+		}
+
+		const int s = avcodec_send_packet(handle->dec, handle->pkt_is_flush ? NULL : handle->pkt);
+		if (s == AVERROR(EAGAIN)) {
+			// 解码器输入满：包留在手上，等调用方 receive 腾出空间再送。
+			return 1;
+		}
+		if (s == AVERROR_EOF) {
+			// 它已经排空过了，后面的输入不会再要。
+			av_packet_unref(handle->pkt);
+			handle->pkt_pending = 0;
+			handle->draining = 1;
+			return 0;
+		}
+		if (s < 0) {
+			if (s == AVERROR_INVALIDDATA) {
+				// 坏包在实时源上是常态（UDP 丢包、TS 拼接错位）。丢掉它继续，
+				// 否则一个坏包就能把整条通道打死——实测在 UDP 推流中途接入时
+				// 就是这样：0 帧、直接 FAIL。
+				handle->damaged_packets++;
+				av_packet_unref(handle->pkt);
+				handle->pkt_pending = 0;
+				return 1;
+			}
+			char msg[96];
+			snprintf(msg, sizeof(msg), "avcodec_send_packet failed (%d)", s);
+			set_error(handle, msg);
+			av_packet_unref(handle->pkt);
+			handle->pkt_pending = 0;
+			return -1;
+		}
+		av_packet_unref(handle->pkt);
+		handle->pkt_pending = 0;
+		if (handle->pkt_is_flush) handle->draining = 1;
+		return 1;
+	}
+}
+
+// 同尺寸、只换像素布局的转换上下文：不做缩放。
+//
+// 用 SWS_BICUBIC 是刻意的：它就是 ffmpeg 命令行在不给 `-sws_flags` 时的默认值，
+// 所以"与 ffmpeg 自己的解码逐字节对照"这条验证对 4:4:4 / 4:2:2 源也能成立
+// （4:2:0 源根本不发生色度重采样，这个标志不影响结果）。
+static int ensure_sws(nv_ffsw_backend *handle, enum AVPixelFormat src_fmt, int w, int h) {
+	const int same = handle->sws != NULL && handle->sws_src_fmt == src_fmt;
+	if (same && handle->sws_src_w == w && handle->sws_src_h == h) return 0;
+	if (handle->sws != NULL) {
+		sws_freeContext(handle->sws);
+		handle->sws = NULL;
+	}
+	handle->sws = sws_getContext(w, h, src_fmt, w, h, AV_PIX_FMT_NV12, SWS_BICUBIC, NULL, NULL, NULL);
+	if (handle->sws == NULL) return -1;
+	handle->sws_src_fmt = src_fmt;
+	handle->sws_src_w = w;
+	handle->sws_src_h = h;
+	return 0;
+}
+
+// 把 handle->frame 里的解码帧打包进槽位，并填好 out。
+//
+// 只重排布局（YUV → NV12），**不做色域换算**：矩阵、码值范围、位深对齐都在
+// core 的色彩层与共享 GLSL compute 里做，硬解与软解共用同一份。
+static nv_ffsw_result pack_frame(nv_ffsw_backend *handle, nv_ffsw_slot *slot, nv_ffsw_video_frame *out) {
+	AVFrame *f = handle->frame;
+
+	if (bit_depth_of((enum AVPixelFormat)f->format) != 8) {
+		// 10-bit 通路是 0011 的内容。这里明确失败，绝不悄悄降到 8-bit 输出
+		// ——那会让 10-bit 片源静默丢掉低两位。
+		set_error(handle, "10-bit software decode not implemented yet (see 0011)");
+		return NV_FFSW_FAIL;
+	}
+
+	const int w = f->width;
+	const int h = f->height;
+	if (w <= 0 || h <= 0) {
+		set_error(handle, "decoded frame has no size");
+		return NV_FFSW_FAIL;
+	}
+	if (slot_reserve(slot, w, h) != 0) {
+		set_error(handle, "out of memory for NV12 slot");
+		return NV_FFSW_FAIL;
+	}
+	if (ensure_sws(handle, (enum AVPixelFormat)f->format, w, h) != 0) {
+		set_error(handle, "sws_getContext failed");
+		return NV_FFSW_FAIL;
+	}
+
+	uint8_t *dst[4] = { slot->y, slot->uv, NULL, NULL };
+	const int dst_stride[4] = { w, slot->uv_row, 0, 0 };
+	const int scaled = sws_scale(handle->sws, (const uint8_t *const *)f->data, f->linesize, 0, h, dst, dst_stride);
+	if (scaled <= 0) {
+		set_error(handle, "sws_scale failed");
+		return NV_FFSW_FAIL;
+	}
+
+	// 容器上的尺寸可能与解码后的显示尺寸不同（宏块对齐 / 裁剪）。以帧为准，
+	// 让之后的 video_width/height 与真实输出一致。
+	if (w != handle->width || h != handle->height) {
+		handle->width = w;
+		handle->height = h;
+	}
+
+	// 逐帧色域：帧上明确写了的值优先（比容器更贴近实际），否则沿用容器。
+	nv_ffsw_colorimetry c = handle->color;
+	if (f->colorspace != AVCOL_SPC_UNSPECIFIED) c.matrix = map_matrix(f->colorspace);
+	if (f->color_primaries != AVCOL_PRI_UNSPECIFIED) c.primaries = map_primaries(f->color_primaries);
+	if (f->color_trc != AVCOL_TRC_UNSPECIFIED) c.transfer = map_transfer(f->color_trc);
+	if (f->color_range != AVCOL_RANGE_UNSPECIFIED) c.range = map_range(f->color_range);
+	c.bit_depth = 8;
+
+	int64_t ts = f->best_effort_timestamp;
+	if (ts == AV_NOPTS_VALUE) ts = f->pts;
+	double pts;
+	if (ts == AV_NOPTS_VALUE) {
+		// 源没给时间戳（部分裸流）：按帧率往前推，保持单调。
+		pts = handle->have_last_pts ? handle->last_pts + handle->fallback_interval : 0.0;
+	} else {
+		pts = (double)ts * av_q2d(handle->fmt->streams[handle->video_stream_index]->time_base);
+	}
+	handle->last_pts = pts;
+	handle->have_last_pts = 1;
+	handle->frames_out++;
+
+	out->y = slot->y;
+	out->uv = slot->uv;
+	out->y_stride = w;
+	out->uv_stride = slot->uv_row;
+	out->width = w;
+	out->height = h;
+	out->bit_depth = 8;
+	out->pts_seconds = pts;
+	out->color = c;
+	out->owner = slot;
+	return NV_FFSW_OK;
+}
+
 nv_ffsw_backend *nv_ffsw_create(void) {
 	nv_ffsw_backend *handle = calloc(1, sizeof(nv_ffsw_backend));
 	if (handle == NULL) return NULL;
 	handle->video_stream_index = -1;
 	handle->color.bit_depth = 8;
 	handle->color.range = NV_FFSW_RANGE_VIDEO;
+	handle->fallback_interval = 1.0 / 25.0; // 帧率未知时的兜底
+	handle->io_timeout_us = 5000000;        // 5 秒：能收场，又不至于误杀慢源
 	return handle;
+}
+
+void nv_ffsw_set_io_timeout_us(nv_ffsw_backend *handle, int64_t microseconds) {
+	if (handle == NULL) return;
+	handle->io_timeout_us = microseconds < 0 ? 0 : microseconds;
 }
 
 void nv_ffsw_close(nv_ffsw_backend *handle) {
 	if (handle == NULL) return;
+	if (handle->sws != NULL) {
+		sws_freeContext(handle->sws);
+		handle->sws = NULL;
+	}
+	handle->sws_src_fmt = AV_PIX_FMT_NONE;
+	handle->sws_src_w = 0;
+	handle->sws_src_h = 0;
+	if (handle->frame != NULL) av_frame_free(&handle->frame);
+	if (handle->pkt != NULL) av_packet_free(&handle->pkt);
 	if (handle->dec != NULL) {
 		avcodec_free_context(&handle->dec);
 	}
 	if (handle->fmt != NULL) {
 		avformat_close_input(&handle->fmt);
 	}
+
+	// 槽位缓冲留着复用（destroy 才释放），但归属必须回到"没人持有"：
+	// close 之后旧帧的 owner 立即失效——与三个兄弟 shim 同契约。
+	for (int i = 0; i < NV_FFSW_SLOT_COUNT; i++) {
+		handle->slots[i].in_use = 0;
+	}
+	handle->slot_cursor = 0;
+	handle->draining = 0;
+	handle->eof = 0;
+	handle->pkt_pending = 0;
+	handle->pkt_is_flush = 0;
+	handle->frame_pending = 0;
+	handle->stream_error = 0;
+	handle->damaged_packets = 0;
+	handle->frames_out = 0;
+	handle->last_pts = 0.0;
+	handle->have_last_pts = 0;
 	handle->video_stream_index = -1;
 	handle->width = 0;
 	handle->height = 0;
@@ -133,6 +467,10 @@ void nv_ffsw_close(nv_ffsw_backend *handle) {
 void nv_ffsw_destroy(nv_ffsw_backend *handle) {
 	if (handle == NULL) return;
 	nv_ffsw_close(handle);
+	for (int i = 0; i < NV_FFSW_SLOT_COUNT; i++) {
+		free(handle->slots[i].y);
+		free(handle->slots[i].uv);
+	}
 	free(handle);
 }
 
@@ -156,14 +494,57 @@ nv_ffsw_colorimetry nv_ffsw_colorimetry_of(nv_ffsw_backend *handle) {
 	return handle == NULL ? empty : handle->color;
 }
 
+long long nv_ffsw_damaged_packet_count(nv_ffsw_backend *handle) {
+	return handle == NULL ? 0 : handle->damaged_packets;
+}
+
 const char *nv_ffsw_last_error(nv_ffsw_backend *handle) {
 	if (handle == NULL) return "";
 	return handle->last_error;
 }
 
-// 打开源并读流信息。只做 demux 侧的准备工作：这一步不开解码器，
-// 解码器在下一步填进 next_video_frame 的实现里。
-nv_ffsw_result nv_ffsw_open(nv_ffsw_backend *handle, const char *url_or_path, nv_ffsw_open_info *out_info) {
+// 源没给时间戳时的兜底帧间隔：优先平均帧率，其次标称帧率，最后 25 fps。
+static double fallback_interval_of(const AVStream *stream) {
+	AVRational r = stream->avg_frame_rate;
+	if (r.num <= 0 || r.den <= 0) r = stream->r_frame_rate;
+	if (r.num <= 0 || r.den <= 0) return 1.0 / 25.0;
+	const double fps = (double)r.num / (double)r.den;
+	if (fps <= 0.0) return 1.0 / 25.0;
+	return 1.0 / fps;
+}
+
+// URL 是否走 RTSP（大小写不敏感）。
+static int is_rtsp_url(const char *url) {
+	return strncasecmp(url, "rtsp://", 7) == 0 || strncasecmp(url, "rtsps://", 8) == 0;
+}
+
+// 打开源时用的协议选项。
+//
+// 两件事是刻意的：
+//   * **超时**：实时源必须能收场。没有超时的 av_read_frame 会把解码线程永久
+//     挂住——实测把 UDP 推流停掉之后进程就在那里不动了。rw_timeout 是协议层
+//     的通用旋钮，timeout / stimeout 分别覆盖 udp+rtsp 与旧版 rtsp 的写法。
+//   * **RTSP 一律走 TCP**：UDP 承载在丢包下会让帧碎片化，而且不少摄像机默认
+//     就是 UDP。代价是重传带来的延迟抖动，对"稳定出画"这个目标更划算。
+static AVDictionary *build_open_options(const nv_ffsw_backend *handle, const char *url_or_path) {
+	AVDictionary *opts = NULL;
+	if (handle->io_timeout_us > 0) {
+		char buf[32];
+		snprintf(buf, sizeof(buf), "%lld", (long long)handle->io_timeout_us);
+		av_dict_set(&opts, "rw_timeout", buf, 0);
+		av_dict_set(&opts, "timeout", buf, 0);
+		av_dict_set(&opts, "stimeout", buf, 0);
+	}
+	if (is_rtsp_url(url_or_path)) {
+		av_dict_set(&opts, "rtsp_transport", "tcp", 0);
+	}
+	return opts;
+}
+
+// 打开源并读流信息。with_decoder = 0 时只做准备（探测用）：`auto` 档靠一次
+// 轻量探测拿编码分类来决定走硬解还是软解，不该为此付一次解码器初始化。
+static nv_ffsw_result open_source(nv_ffsw_backend *handle, const char *url_or_path,
+                                  nv_ffsw_open_info *out_info, int with_decoder) {
 	if (handle == NULL || url_or_path == NULL) {
 		set_error(handle, "open: null handle or url");
 		return NV_FFSW_FAIL;
@@ -171,7 +552,9 @@ nv_ffsw_result nv_ffsw_open(nv_ffsw_backend *handle, const char *url_or_path, nv
 
 	nv_ffsw_close(handle);
 
-	int err = avformat_open_input(&handle->fmt, url_or_path, NULL, NULL);
+	AVDictionary *opts = build_open_options(handle, url_or_path);
+	int err = avformat_open_input(&handle->fmt, url_or_path, NULL, &opts);
+	av_dict_free(&opts);
 	if (err < 0) {
 		set_error(handle, "avformat_open_input failed");
 		return NV_FFSW_FAIL;
@@ -207,6 +590,27 @@ nv_ffsw_result nv_ffsw_open(nv_ffsw_backend *handle, const char *url_or_path, nv
 	handle->color.transfer = map_transfer(stream->codecpar->color_trc);
 	handle->color.range = map_range(stream->codecpar->color_range);
 	handle->color.bit_depth = 8; // 真实位深由解码后的帧覆盖
+	handle->fallback_interval = fallback_interval_of(stream);
+
+	// 容器里的像素格式只是最佳猜测（有些编码器到首个关键帧才说清），
+	// 真正的位深由解码后的帧给出并逐帧覆盖。
+	if (stream->codecpar->format >= 0) {
+		handle->color.bit_depth = bit_depth_of((enum AVPixelFormat)stream->codecpar->format);
+	}
+
+	if (with_decoder) {
+		handle->pkt = av_packet_alloc();
+		handle->frame = av_frame_alloc();
+		if (handle->pkt == NULL || handle->frame == NULL) {
+			set_error(handle, "alloc packet/frame failed");
+			nv_ffsw_close(handle);
+			return NV_FFSW_FAIL;
+		}
+		if (open_decoder(handle, stream) != 0) {
+			nv_ffsw_close(handle);
+			return NV_FFSW_FAIL;
+		}
+	}
 
 	if (out_info != NULL) {
 		memset(out_info, 0, sizeof(*out_info));
@@ -219,12 +623,17 @@ nv_ffsw_result nv_ffsw_open(nv_ffsw_backend *handle, const char *url_or_path, nv
 	return NV_FFSW_OK;
 }
 
+// 正式打开：连解码器一起备好（这是"能出帧"的路径）。
+nv_ffsw_result nv_ffsw_open(nv_ffsw_backend *handle, const char *url_or_path, nv_ffsw_open_info *out_info) {
+	return open_source(handle, url_or_path, out_info, 1);
+}
+
 nv_ffsw_codec_class nv_ffsw_probe(const char *url_or_path, nv_ffsw_open_info *out_info) {
 	nv_ffsw_backend *handle = nv_ffsw_create();
 	if (handle == NULL) return NV_FFSW_CODEC_UNKNOWN;
 
 	nv_ffsw_codec_class klass = NV_FFSW_CODEC_UNKNOWN;
-	if (nv_ffsw_open(handle, url_or_path, out_info) == NV_FFSW_OK) {
+	if (open_source(handle, url_or_path, out_info, 0) == NV_FFSW_OK) {
 		AVStream *stream = handle->fmt->streams[handle->video_stream_index];
 		klass = classify(stream->codecpar->codec_id);
 		if (out_info != NULL && stream->avg_frame_rate.num > 0) {
@@ -235,24 +644,74 @@ nv_ffsw_codec_class nv_ffsw_probe(const char *url_or_path, nv_ffsw_open_info *ou
 	return klass;
 }
 
-// 解码与打包见下一步。在此之前明确返回 NONE（"干净地没有帧"），
-// 而不是 FAIL —— 后端尚未实现不等于源有问题。
 nv_ffsw_result nv_ffsw_next_video_frame(nv_ffsw_backend *handle, nv_ffsw_video_frame *out) {
 	if (handle == NULL || out == NULL) {
 		set_error(handle, "next_video_frame: null argument");
 		return NV_FFSW_FAIL;
 	}
-	if (handle->fmt == NULL) {
+	if (handle->fmt == NULL || handle->dec == NULL) {
 		set_error(handle, "next_video_frame: no source open");
 		return NV_FFSW_FAIL;
 	}
-	_Static_assert(sizeof(enum AVCodecID) >= 1, "ffmpeg headers present");
-	// 未实现：见文件头注释。
-	set_error(handle, "decode not implemented yet (0010 step 2)");
-	return NV_FFSW_NONE;
+
+	// 已经排空的流：文件读完是干净的 NONE，源中途死掉是要重开的 FAIL。
+	if (handle->eof) return report_end(handle);
+
+	int stalls = 0;
+	for (;;) {
+		// 上一轮已经解出来、只是当时没有空槽位的那帧先交付。留着它，
+		// 槽位耗尽的 NONE 才是纯背压（可重试）而不是丢帧。
+		if (handle->frame_pending) {
+			nv_ffsw_slot *slot = slot_acquire(handle);
+			if (slot == NULL) return NV_FFSW_NONE;
+			const nv_ffsw_result packed = pack_frame(handle, slot, out);
+			if (packed != NV_FFSW_OK) {
+				slot_release(slot);
+				return packed;
+			}
+			handle->frame_pending = 0;
+			av_frame_unref(handle->frame);
+			return NV_FFSW_OK;
+		}
+
+		const int r = avcodec_receive_frame(handle->dec, handle->frame);
+		if (r == 0) {
+			handle->frame_pending = 1;
+			continue; // 回到环顶去拿槽位并打包
+		}
+		if (r == AVERROR_EOF) {
+			handle->eof = 1;
+			return report_end(handle);
+		}
+		if (r != AVERROR(EAGAIN)) {
+			char msg[96];
+			snprintf(msg, sizeof(msg), "avcodec_receive_frame failed (%d)", r);
+			set_error(handle, msg);
+			return NV_FFSW_FAIL;
+		}
+
+		// EAGAIN：解码器要更多输入才能出下一帧。
+		const int fed = feed_decoder(handle);
+		if (fed < 0) return NV_FFSW_FAIL;
+		// 输入到底后 receive 只可能给 EOF 或最后一帧；这里再兜一次，
+		// 免得解码器行为异常时把调用方转进死循环。
+		if (fed == 0 && ++stalls > 1) {
+			handle->eof = 1;
+			return report_end(handle);
+		}
+	}
 }
 
 void nv_ffsw_frame_release(void *owner) {
-	// 槽位环在下一步引入；当前没有帧出队，故为空操作。
-	(void)owner;
+	slot_release((nv_ffsw_slot *)owner);
+}
+
+// 流结束时的收场：干净读完给 NONE，读到硬错误（超时等）给 FAIL 并写明原因。
+// 这两个结果对调用方意味着完全不同的动作——继续等，还是重开。
+static nv_ffsw_result report_end(nv_ffsw_backend *handle) {
+	if (handle->stream_error == 0) return NV_FFSW_NONE;
+	char msg[96];
+	snprintf(msg, sizeof(msg), "read failed (%d)", handle->stream_error);
+	set_error(handle, msg);
+	return NV_FFSW_FAIL;
 }
