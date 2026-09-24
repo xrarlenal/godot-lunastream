@@ -23,6 +23,7 @@ const String = godot.builtin.String;
 const StringName = godot.builtin.StringName;
 
 const core = @import("core");
+const LunaVideoStreamPlayback = @import("luna_video_stream_playback.zig");
 
 // ---------------------------------------------------------------------------
 // 字段
@@ -145,6 +146,20 @@ pub fn getDecoder(self: *LunaVideoStream) i64 {
 /// 本步返回 null：类可实例化、绑定可用是这一步要证明的事；播放实现见
 /// docs/ROADMAP.md 的"VideoStream / VideoStreamPlayback / 资源加载器"。
 pub fn _instantiatePlayback(self: *LunaVideoStream) ?*VideoStreamPlayback {
-    _ = self;
-    return null;
+    // 从基类拿 `file`（官方文档写明它可以是路径**或 URI**），交给播放实现去打开。
+    const path_string = self.base.getFile();
+    const path = path_string.toAsciiBuffer();
+    if (path.size() <= 0) return null;
+
+    const playback = LunaVideoStreamPlayback.create(&self.allocator) catch return null;
+    // 把 C 侧的字节转成切片：`toAsciiBuffer()` 出来的 PackedByteArray 去掉结尾的 0。
+    const raw: [*]const u8 = @ptrFromInt(@intFromPtr(path.indexConst(0)));
+    const len: usize = @intCast(path.size());
+    const slice = if (len > 0 and raw[len - 1] == 0) raw[0 .. len - 1] else raw[0..len];
+    if (!playback.load(slice)) {
+        // 打开失败也要把对象交给引擎（它自己会显示"播放失败"），并把原因留在
+        // get_last_error 里；返回 null 会让 VideoStreamPlayer 直接报错退出。
+        return playback.base;
+    }
+    return playback.base;
 }

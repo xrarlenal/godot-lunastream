@@ -41,6 +41,12 @@ pub const FfswBackend = struct {
             .next_video_frame = nextFrameFn,
         } };
     }
+
+    /// 释放 C 侧的句柄（close + destroy）。与 vtable 的 `deinit` 等价，但可以直接
+    /// 在持有具体类型的地方调——调用点不必先造一个 Backend 值出来。
+    pub fn deinit(self: *FfswBackend) void {
+        shim.nv_ffsw_destroy(self.handle);
+    }
 };
 
 fn selfFrom(ptr: *anyopaque) *FfswBackend {

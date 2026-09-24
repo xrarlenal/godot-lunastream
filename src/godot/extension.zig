@@ -11,6 +11,7 @@ const Registry = godot.extension.Registry;
 
 const LunaVideoStream = @import("luna_video_stream.zig");
 const LunaSelfTest = @import("luna_self_test.zig");
+const LunaVideoStreamPlayback = @import("luna_video_stream_playback.zig");
 
 const builtin = @import("builtin");
 
@@ -33,9 +34,11 @@ comptime {
 pub fn register(r: *Registry) void {
     r.addModule(LunaVideoStream);
     r.addModule(LunaSelfTest);
+    r.addModule(LunaVideoStreamPlayback);
 }
 
 pub fn unregister(r: *Registry) void {
+    r.removeModule(LunaVideoStreamPlayback);
     r.removeModule(LunaSelfTest);
     r.removeModule(LunaVideoStream);
 }
