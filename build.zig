@@ -153,6 +153,53 @@ pub fn build(b: *Build) !void {
     cmp10.step.dependOn(&ref_cmd10.step);
     ffsw_step.dependOn(&cmp10.step);
 
+    // --- decode-smoke：不需要 Godot 的解码烟测（可直接喂 URL） ---
+    //
+    // 与 ffsw-selftest 分工不同：那个断言"解出来的对不对"，这个回答"这条源能不能
+    // 解、解得快不快"，并且把它从"Godot 里能不能出画"里摘出来。硬性判据只有一条：
+    // 一帧都没解出来就是失败；计时只作为观测（机器负载会让它抖，不该进判据）。
+    //
+    // 默认跑一个生成的 960x540 片源；要用在真实源上就直接调用构建产物：
+    //   <zig-out 或 .zig-cache 里的 decode_smoke> rtsp://192.168.1.64:8554/stream --frames 300
+    const smoke_step = b.step("decode-smoke", "解码烟测：不需要 Godot，可直接喂 URL（默认跑生成的片源）");
+
+    const smoke_exe = b.addExecutable(.{
+        .name = "decode_smoke",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    smoke_exe.root_module.addCSourceFiles(.{
+        .files = &.{ "src/ffsw/ffsw_shim.c", "src/ffsw/decode_smoke.c" },
+        .flags = &.{ "-std=c11", "-Wall", "-Wextra" },
+    });
+    smoke_exe.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "include" }) });
+    smoke_exe.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ ffmpeg_prefix, "lib" }) });
+    for ([_][]const u8{ "avformat", "avcodec", "avutil", "swscale" }) |lib| {
+        smoke_exe.root_module.linkSystemLibrary(lib, .{});
+    }
+
+    // 片源用 mpeg4（内置编码器）而不是 libx264：这一步要能在任何装了 FFmpeg 的
+    // 机器上跑。想看 H.264 的性能基线，自己生成一段再喂给同一个二进制即可。
+    const smoke_clip = b.pathJoin(&.{ ffsw_work, "smoke_960x540.mp4" });
+    const smoke_gen = b.addSystemCommand(&.{
+        "ffmpeg", "-y", "-v", "error",
+        "-f",    "lavfi",
+        "-i",    "testsrc=size=960x540:rate=30:duration=2",
+        "-c:v",  "mpeg4",
+        "-q:v",  "4",
+        smoke_clip,
+    });
+    smoke_gen.step.dependOn(&ffsw_mkdir.step);
+
+    const smoke_run = b.addRunArtifact(smoke_exe);
+    smoke_run.stdio = .inherit;
+    smoke_run.addArg(smoke_clip);
+    smoke_run.step.dependOn(&smoke_gen.step);
+    smoke_step.dependOn(&smoke_run.step);
+
     // --- GDExtension：gdzig 绑定 + 扩展入口 ---
     const gdzig_dep = if (opt_godot_path) |godot_path| b.dependency("gdzig", .{
         .target = target,

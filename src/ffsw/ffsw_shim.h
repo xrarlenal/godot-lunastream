@@ -134,6 +134,13 @@ typedef struct {
 // `auto` 档要靠它拿编码分类来决定走硬解还是软解。
 nv_ffsw_codec_class nv_ffsw_probe(const char *url_or_path, nv_ffsw_open_info *out_info);
 
+// 已经打开的句柄上的编码分类——与 nv_ffsw_probe 同一个判定，但不做事先的连接。
+//
+// 存在的理由很实际：`probe` 要自己开一次源。对文件无所谓，对摄像头是**多占一路
+// 连接**（有些设备会直接拒绝第二路）。所以凡是"已经 open 了、只是想打印分类"的
+// 场合都应该用这个，而不是 probe。
+nv_ffsw_codec_class nv_ffsw_open_codec_class(nv_ffsw_backend *handle);
+
 nv_ffsw_backend *nv_ffsw_create(void);
 void nv_ffsw_destroy(nv_ffsw_backend *handle);
 

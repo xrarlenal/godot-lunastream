@@ -74,6 +74,9 @@ struct nv_ffsw_backend {
 	// 包绝不能变成"整条流失败"——但也不能装作没发生，因此计数待查。
 	long long damaged_packets;
 
+	// 打开时记下的编码分类（省得为了打印一行字再连一次源）。
+	nv_ffsw_codec_class codec_class;
+
 	int width;
 	int height;
 	// 源没给时间戳时的兜底帧间隔（秒），由帧率推得。
@@ -619,6 +622,7 @@ static nv_ffsw_result open_source(nv_ffsw_backend *handle, const char *url_or_pa
 	handle->video_stream_index = index;
 
 	AVStream *stream = handle->fmt->streams[index];
+	handle->codec_class = classify(stream->codecpar->codec_id);
 	handle->width = stream->codecpar->width;
 	handle->height = stream->codecpar->height;
 
@@ -685,6 +689,10 @@ nv_ffsw_codec_class nv_ffsw_probe(const char *url_or_path, nv_ffsw_open_info *ou
 	}
 	nv_ffsw_destroy(handle);
 	return klass;
+}
+
+nv_ffsw_codec_class nv_ffsw_open_codec_class(nv_ffsw_backend *handle) {
+	return handle == NULL ? NV_FFSW_CODEC_UNKNOWN : handle->codec_class;
 }
 
 nv_ffsw_result nv_ffsw_next_video_frame(nv_ffsw_backend *handle, nv_ffsw_video_frame *out) {
