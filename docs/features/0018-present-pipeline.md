@@ -160,3 +160,28 @@ Godot 4.6 **没有**暴露 `VideoStreamPlayer.get_stream_playback()`，所以诊
 
 退出时那条 `ObjectDB instances leaked at exit` 还在（0022）。本步没有碰它——它是
 独立条目，且**不影响播放正确性**（播放本身已经逐项验证过）。
+
+## 资源加载器：试过，暂时撤回（附证据）
+
+目标是让 `load("res://clip.mp4")` 直接得到一路 `LunaVideoStream`（PLAN 5.3 说的
+"能跑但不像 API" 那件事）。实现本身照源工程的 `native_video_resource_format_loader.zig`
+写完了（`_getRecognizedExtensions` / `_handlesType` / `_getResourceType` / `_load`），
+但在注册这一步撞墙，实测两条引擎报错：
+
+```
+ERROR: Cannot get class 'LunaVideoResourceFormatLoader'.
+ERROR: Failed to retrieve non-existent singleton 'ResourceLoader'.
+```
+
+也就是说：**在扩展注册的时机（场景级）拿不到 `ResourceLoader` 单例**，而类注册也没
+生效。源工程为此专门写了一个 `LoaderLifecycle`（按初始化级别挂钩、在合适的级别创建
+实例并 `add_resource_format_loader`）——说明这件事对时机有要求，不是随手在 `register()`
+里调一下就行。
+
+处置：**撤回**（而不是留一个会让扩展带错误启动的版本）。现在 `file = "rtsp://..."`
+与 `file = "res://..."` 两条路都仍然可用（直接赋值），只是少了"用 `load()` 拿资源"
+这一种写法。
+
+下一步要做的事：照源工程那样实现按级别的生命周期钩子，把加载器挂在
+`SERVERS` 级（`ResourceLoader` 单例那时已经存在），再在自检里加一条
+`ResourceLoader.exists("res://clip.mp4")` + `load()` 类型断言。
