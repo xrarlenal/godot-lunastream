@@ -1,19 +1,16 @@
-// NV12 / 右对齐 16 位半平面 → RGBA。软解与硬解两条路共用这一份。
-//
-// 设计上刻意**不含任何数值常数**：归一化（减黑电平/减中性点、乘满量程倒数）与
-// YCbCr→RGB 的四个系数全部从推送常量进来，而那些常数由 core 的色彩层算出来
-// （core/push_constants.zig，数学只在 core/color.zig 里定义一次）。
-//
-// 这样做的代价是推送常量稍大（48 字节），收益是"CPU 与 GPU 的数学不会各自漂移"——
-// 源工程曾专门写测试解析着色器源码、比对手抄的常数，这里从结构上就不需要那种测试。
-//
-// 推送常量的字段顺序与大小由 src/shaders/nv12_shader_abi_test.zig 对着本文件的
-// push_constant 块守着，改任何一边都会红。
-
 #[compute]
 #version 450
-
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
+
+// NV12 / 右对齐 16 位半平面 → RGBA。软解与硬解两条路共用这一份。
+//
+// 设计上刻意不含任何数值常数：归一化与 YCbCr→RGB 的四个系数全部从推送常量进来，
+// 而那些常数由 core 的色彩层算出来（core/push_constants.zig，数学只在
+// core/color.zig 里定义一次）。代价是推送常量稍大（48 字节），收益是 CPU 与 GPU
+// 的数学不会各自漂移。
+//
+// `#[compute]` 与 `#version` 必须是前两行：Godot 的 GLSL 前端在这里做识别，前面
+// 放注释就会报出与真实原因无关的编译错误（这一版被绊了一次）。
 
 layout(set = 0, binding = 0) uniform sampler2D luma_tex;
 layout(set = 0, binding = 1) uniform sampler2D chroma_tex;

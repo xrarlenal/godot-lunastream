@@ -12,9 +12,10 @@ const std = @import("std");
 const testing = std.testing;
 
 const core = @import("core");
+const shaders = @import("shaders");
 const Nv12PushConstants = core.push_constants.Nv12PushConstants;
 
-const shader_src = @embedFile("nv12_to_rgba.comp");
+const shader_src = shaders.nv12_to_rgba;
 
 /// 取出 `layout(push_constant ...) uniform Params { ... } params;` 之间的正文。
 fn pushConstantBlock(src: []const u8) []const u8 {

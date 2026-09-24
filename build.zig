@@ -48,13 +48,25 @@ pub fn build(b: *Build) !void {
     const ffsw_abi_tests = b.addTest(.{ .root_module = ffsw_abi_mod });
     test_step.dependOn(&b.addRunArtifact(ffsw_abi_tests).step);
 
+    // --- 着色器源码模块（0018） ---
+    // `@embedFile` 不能跨出模块根目录，所以着色器自己是一个模块；呈现管线与 ABI
+    // 守卫都从它取源码，源码因此只有一份。
+    const shaders_mod = b.createModule(.{
+        .root_source_file = b.path("src/shaders/shader_sources.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     // --- 着色器推送常量的 ABI 守卫（0018） ---
     // 同样只 @embedFile 读文本再与 core 的结构体比对，不需要 GPU / Godot。
     const shader_abi_mod = b.createModule(.{
         .root_source_file = b.path("src/shaders/nv12_shader_abi_test.zig"),
         .target = target,
         .optimize = optimize,
-        .imports = &.{.{ .name = "core", .module = core_mod }},
+        .imports = &.{
+            .{ .name = "core", .module = core_mod },
+            .{ .name = "shaders", .module = shaders_mod },
+        },
     });
     const shader_abi_tests = b.addTest(.{ .root_module = shader_abi_mod });
     test_step.dependOn(&b.addRunArtifact(shader_abi_tests).step);
@@ -231,6 +243,7 @@ pub fn build(b: *Build) !void {
         .imports = &.{
             .{ .name = "godot", .module = gdzig_dep.module("gdzig") },
             .{ .name = "core", .module = core_mod },
+            .{ .name = "shaders", .module = shaders_mod },
         },
     });
 
