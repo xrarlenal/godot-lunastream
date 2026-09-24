@@ -5,6 +5,7 @@ extends Node3D
 const CLASS_NAME := "LunaVideoStream"
 
 var _failures := 0
+var _stream: Object = null
 
 
 func _check(label: String, ok: bool, detail: String = "") -> void:
@@ -21,7 +22,8 @@ func _ready() -> void:
 		_finish()
 		return
 
-	var stream = ClassDB.instantiate(CLASS_NAME)
+	_stream = ClassDB.instantiate(CLASS_NAME)
+	var stream := _stream
 	_check("类可实例化", stream != null, str(stream))
 	if stream == null:
 		_finish()
@@ -46,7 +48,8 @@ func _finish() -> void:
 		print("[smoke] RESULT=PASS")
 	else:
 		printerr("[smoke] RESULT=FAIL failures=", _failures)
-	# 让 deferred 的引用交还有机会执行（见 0022）：否则脚本在同一帧里
-	# 创建又退出，插件那一次的延迟释放来不及跑，退出时报实例泄漏。
+	# 先松开脚本这份引用，再等一帧，让 deferred 的引用交还有机会执行（见 0022）。
+	# 少了任何一步，退出时都会报实例泄漏。
+	_stream = null
 	await get_tree().process_frame
 	get_tree().quit(0 if _failures == 0 else 1)

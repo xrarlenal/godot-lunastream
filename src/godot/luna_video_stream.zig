@@ -101,7 +101,10 @@ pub fn destroy(self: *LunaVideoStream, allocator: *Allocator) void {
 pub fn _notification(self: *LunaVideoStream, what: i32, reversed: bool) void {
     _ = reversed;
     if (what == Object.NOTIFICATION_POSTINITIALIZE) {
-        _ = self.base.callDeferred(StringName.fromLatin1("release_creator_ref", false), .{});
+        // is_static = true：这是编译期字面量，生命周期覆盖整个进程。
+        // 传 false 等于声明"我自己负责析构"，而 gdzig 的注释写明静态字面量
+        // 不该被析构——传错会在退出时报 "Orphan StringName"。
+        _ = self.base.callDeferred(StringName.fromLatin1("release_creator_ref", true), .{});
     }
 }
 
