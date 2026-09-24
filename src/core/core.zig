@@ -14,6 +14,7 @@ pub const frame_queue = @import("frame_queue.zig");
 pub const closure = @import("closure.zig");
 pub const retire_ring = @import("retire_ring.zig");
 pub const present_selector = @import("present_selector.zig");
+pub const color = @import("color.zig");
 
 test "core 模块可以编译并被引用" {
     try std.testing.expect(version.len > 0);

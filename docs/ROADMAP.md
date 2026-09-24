@@ -14,8 +14,8 @@
 | 0003 | GDExtension 最小可加载骨架 | Godot | ✅ 已完成（提前做） |
 | 0004 | 帧回收环（呈现完成后再释放） | core | ✅ 已完成 |
 | 0005 | 呈现选择器（drop-late / hold-early） | core | ✅ 已完成 |
-| 0006 | 色彩矩阵与位深归一化（色域 / HDR / 10-bit） | core | 进行中 |
-| 0007 | 线程原语与有界 worker 池（Zig 0.16 `std.Io` 适配） | core | 待做 |
+| 0006 | 色彩层（色域矩阵 / 码值范围 / 位深对齐） | core | ✅ 已完成 |
+| 0007 | 线程原语与有界 worker 池（Zig 0.16 `std.Io` 适配） | core | 进行中 |
 | 0008 | 播放控制器与状态机（IDLE/OPENING/PLAYING/STALLED/FAILED） | core | 待做 |
 | 0009 | 后端选择器与硬解名额预算（auto/hardware/software） | core | 待做 |
 | 0010 | FFmpeg 解封装与软解后端（`ffsw`） | 解码 | 待做 |
@@ -31,6 +31,7 @@
 | 0020 | 纹理直给（`stream.texture`） | Godot | 待做 |
 | 0021 | 打包、许可与发布产物 | 交付 | 待做 |
 | 0022 | 修 gdzig 类实例泄漏与 headless 导入崩溃（候选） | Godot | 待评估 |
+| 0023 | HDR 传输函数与色调映射（PQ / HLG / BT.2020→BT.709） | core | 待做 |
 
 ## 说明
 
