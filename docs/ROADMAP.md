@@ -13,8 +13,8 @@
 | 0002 | 有界帧队列（SPSC 环形队列） | core | ✅ 已完成 |
 | 0003 | GDExtension 最小可加载骨架 | Godot | ✅ 已完成（提前做） |
 | 0004 | 帧回收环（呈现完成后再释放） | core | ✅ 已完成 |
-| 0005 | 呈现选择器（drop-late / hold-early） | core | 进行中 |
-| 0006 | 色彩矩阵与位深归一化（色域 / HDR / 10-bit） | core | 待做 |
+| 0005 | 呈现选择器（drop-late / hold-early） | core | ✅ 已完成 |
+| 0006 | 色彩矩阵与位深归一化（色域 / HDR / 10-bit） | core | 进行中 |
 | 0007 | 线程原语与有界 worker 池（Zig 0.16 `std.Io` 适配） | core | 待做 |
 | 0008 | 播放控制器与状态机（IDLE/OPENING/PLAYING/STALLED/FAILED） | core | 待做 |
 | 0009 | 后端选择器与硬解名额预算（auto/hardware/software） | core | 待做 |
