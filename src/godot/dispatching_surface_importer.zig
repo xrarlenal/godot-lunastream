@@ -47,7 +47,7 @@ pub const Stats = struct {
 pub const DispatchingImporter = struct {
     allocator: Allocator,
     cpu: CpuFrameImporter,
-    /// 平台导入器在 0015-0017 落地后挂进来；在此之前 `native_surface` 帧会被拒绝。
+    /// 平台导入器在 0015-0017 写好之后挂进来；在此之前 `native_surface` 帧会被拒绝。
     platform: ?SurfaceImporter = null,
     served_cpu: u64 = 0,
     served_platform: u64 = 0,

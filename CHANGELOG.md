@@ -10,9 +10,9 @@
 - **接入方式**：`VideoStreamPlayer.stream = 一个 LunaVideoStream`；`file` 可以是路径
   或 URI（Godot 官方对 `VideoStream.file` 的定义就是"路径或 URI"）。工程内的媒体文件
   还可以直接 `load("res://clip.mp4")`（自带资源加载器）。
-- **解码**：FFmpeg 解封装 + 软解（`ffsw`）；硬解后端按平台接入（macOS 的 Metal 零拷贝
-  已实现并验证；Windows 的 D3D12 与 Linux 的 Vulkan/dma-buf 已移植，见下表）。
-- **呈现**：共享 compute 把 NV12 / 右对齐 16 位半平面转成 RGBA，输出到一块**稳定**的
+- **解码**：FFmpeg 解封装 + 软解（`ffsw`）；帧导入按平台接（macOS 的 Metal、Windows 的
+  D3D12、Linux 的 Vulkan/dma-buf），见下表。
+- **呈现**：共享 compute 把 NV12 / 右对齐 16 位半平面转成 RGBA，输出到一块
   `Texture2DRD`（每帧只重指 RID，引用它的材质不会失效）。
 - **HDR**：PQ / HLG 传输函数 + 色调映射 + BT.2020→BT.709，逐像素与 core 的数学对齐。
 - **状态与统计**：`state_changed` / `frame_ready` / `stats_updated` 三个信号，
@@ -22,12 +22,14 @@
 
 ### 平台
 
-| 平台 | 驱动 | 硬解 | 零拷贝 | 状态 |
+| 平台 | 驱动 | 解码 | 帧 → 纹理 | 状态 |
 |---|---|---|---|---|
-| macOS（Apple Silicon 实测） | Metal | VideoToolbox | 是 | **已实现并验证**（M1 Pro / Godot 4.6.2） |
-| Windows | D3D12 | D3D11VA | 是 | 代码已移植、交叉编译通过；**待真机验证** |
-| Windows | Vulkan | D3D11VA | 否（一次读回） | 同上（降级路径如实上报） |
-| Linux x86_64 | Vulkan | VAAPI | 是（依赖随包 Vulkan Layer） | 代码已移植、交叉编译通过；**待真机验证** |
+| macOS | Metal | FFmpeg 软解 | CPU 上传 / Metal 导入器 | 本机播放跑通（Godot 4.6.2） |
+| Windows | D3D12 | FFmpeg 软解 | D3D12 导入器已移植 | 交叉编译通过，未在真机运行 |
+| Linux x86_64 | Vulkan | FFmpeg 软解 | dma-buf 导入器与随包 Layer 已移植 | 交叉编译通过，未在真机运行 |
+
+各平台的硬解后端都还没有实现；已经写好的是帧导入——把解码器给出的原生表面
+（CoreVideo / D3D12 / dma-buf）包装成 Godot 纹理。
 
 ### 许可
 

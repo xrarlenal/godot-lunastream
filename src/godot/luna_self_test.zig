@@ -737,7 +737,7 @@ fn verifyHdrOutput(self: *LunaSelfTest, report: *Report) void {
 
 /// Metal 零拷贝（0015）：自己造一块 IOSurface 支撑的 CVPixelBuffer 喂进分发器。
 ///
-/// 为什么能"自己造"：本仓库还没有硬解后端（ffvt 未落地），而这个导入器吃的正是
+/// 为什么能"自己造"：本仓库还没有硬解后端（ffvt 尚未实现），而这个导入器吃的正是
 /// 硬解帧的形状（native_surface + CVPixelBuffer）。造假输入的代价只是几十行桥代码，
 /// 换来的是零拷贝路径能在真机上被验证——包括"与像素缓冲行距不一致"这种一上手就会
 /// 踩到的坑。

@@ -32,7 +32,7 @@ Godot 的纹理 RID  →  交给分发器（0014）与呈现管线
 
 ### 1. 造一块"硬解形状"的输入来验证
 
-本仓库还没有硬解后端（`ffvt` 未落地），而 Metal 导入器吃的正是硬解帧的形状
+本仓库还没有硬解后端（`ffvt` 尚未实现），而 Metal 导入器吃的正是硬解帧的形状
 （`native_surface` 加 `CVPixelBuffer`）。所以自检自己造一块：`nv_cv_probe_create()`
 用 `CVPixelBufferCreate` 造一块 **IOSurface 支撑**的 NV12 缓冲。
 
@@ -88,7 +88,7 @@ zig build decode-smoke                # SMOKE=PASS（未受影响）
 Godot --headless --path example/...   # 0003 的 headless 自检仍 RESULT=PASS
 ```
 
-机器：Apple M1 Pro / Metal 4.0 / Godot 4.6.2。
+环境：Metal 4.0 / Godot 4.6.2。
 
 ### 过程中的两个坑（都写进注释）
 
@@ -105,8 +105,8 @@ Godot --headless --path example/...   # 0003 的 headless 自检仍 RESULT=PASS
 ## 已知限制 / 下一步
 
 - **没有硬解后端**：这条路的输入目前只能由自检造。真实帧要等 `ffvt`（VideoToolbox）
-  落地——它不在推进表的 0000–0023 里，属于 PLAN 里"能力基线"的一部分（源工程已有）。
-  在它落地之前，真实使用中不会出现 `native_surface` 帧。
+  实现——它不在推进表的 0000–0023 里，属于 PLAN 里"能力基线"的一部分（源工程已有）。
+  在它写好之前，真实使用中不会出现 `native_surface` 帧。
 - 只验证了 8-bit NV12（`420YpCbCr8BiPlanarVideoRange`）。macOS 的 10-bit 硬解格式是
   `x420`（CoreVideo 的 10 位半平面、**左对齐**），它的对齐换算属于色彩层与呈现管线
   那一步，本步没有碰。

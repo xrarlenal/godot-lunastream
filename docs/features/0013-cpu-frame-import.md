@@ -79,7 +79,7 @@ zig build godot-importer-selftest      # 需要带渲染上下文的 Godot（会
 
 `example/gdextension-smoke/importer_smoke.tscn` → GDScript 驱动 → 扩展侧的
 `LunaSelfTest` 跑 24 项检查。**回读比对是其中最硬的一条**：上传什么字节，回读就是
-什么字节（8-bit 亮度/色度、10-bit 亮度各一组），它同时证明布局正确、上传真的落地、
+什么字节（8-bit 亮度/色度、10-bit 亮度各一组），它同时证明布局正确、上传确实执行、
 没有偷偷做格式转换。
 
 池语义那几条（并发开新槽、归还后复用不新建、取满报背压、空闲换规格立刻释放、

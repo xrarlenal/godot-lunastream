@@ -42,7 +42,7 @@ base: *VideoStream,
 
 /// 解码器策略：`auto` / `hardware` / `software`。
 ///
-/// 这一步只落地"存储 + 绑定"——先确认枚举属性在 GDScript 侧读写正常，
+/// 这一步只做"存储 + 绑定"——先确认枚举属性在 GDScript 侧读写正常，
 /// 真正的决策逻辑（含硬解名额预算）由后端选择器那一步接线。
 decoder_choice: i64 = 0,
 
