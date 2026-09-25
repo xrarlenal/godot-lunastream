@@ -58,7 +58,7 @@ stream.set_output_mode(1)              # 1 = HDR, per-frame PQ / HLG tone mappin
 
 | Platform | Rendering driver | Decoding | Frame → texture | Status |
 |---|---|---|---|---|
-| macOS | Metal | FFmpeg software | CPU upload / Metal importer | Playback verified locally (M1 Pro, Godot 4.6.2) |
+| macOS | Metal | FFmpeg software | CPU upload / Metal importer | Playback verified locally (Godot 4.6.2) |
 | Windows | D3D12 | FFmpeg software | D3D12 importer ported | Cross-compiles; not yet run on hardware |
 | Linux x86_64 | Vulkan | FFmpeg software | dma-buf importer and bundled layer ported | Cross-compiles; not yet run on hardware |
 

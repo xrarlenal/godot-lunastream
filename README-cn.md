@@ -55,7 +55,7 @@ stream.set_output_mode(1)              # 1 = HDR，按帧的传输函数做 PQ /
 
 | 平台 | 渲染驱动 | 解码 | 帧 → 纹理 | 状态 |
 |---|---|---|---|---|
-| macOS | Metal | FFmpeg 软解 | CPU 上传 / Metal 导入器 | 播放链路已在本机验证（M1 Pro，Godot 4.6.2） |
+| macOS | Metal | FFmpeg 软解 | CPU 上传 / Metal 导入器 | 播放链路已在本机验证（Godot 4.6.2） |
 | Windows | D3D12 | FFmpeg 软解 | D3D12 导入器已移植 | 交叉编译通过，待真机验证 |
 | Linux x86_64 | Vulkan | FFmpeg 软解 | dma-buf 导入器与随包 Layer 已移植 | 交叉编译通过，待真机验证 |
 
