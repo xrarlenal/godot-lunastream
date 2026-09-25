@@ -2,9 +2,11 @@
 
 [简体中文](README-cn.md)
 
-A Godot 4 GDExtension that gives `VideoStreamPlayer` a `VideoStream` implementation:
-`rtsp://`, `rtmp://`, `http(s)://` and local files play as a source directly, with no
-external player process involved.
+A Godot 4 GDExtension for playing **RTSP / RTMP / HTTP(S) streams and local video
+files** through `VideoStreamPlayer`. If you are looking for *godot rtsp*, *godot ip
+camera* or *godot play mp4* support: Godot's built-in `VideoStreamPlayer` only handles
+Theora, and this extension gives it a `VideoStream` implementation for the formats you
+actually use — with no external player process involved.
 
 Copy the `addons/lunastream/` directory from a release package into your Godot project.
 That directory is self-contained — the extension library, the GDExtension manifest and

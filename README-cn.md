@@ -2,8 +2,10 @@
 
 [English](README.md)
 
-Godot 4 的 GDExtension：`VideoStreamPlayer` 可以直接播 `rtsp://`、`rtmp://`、
-`http(s)://` 和本地文件，工程里不需要外挂播放器进程。
+Godot 4 的 GDExtension：让 `VideoStreamPlayer` 能播 **RTSP / RTMP / HTTP(S) 流与本地视频
+文件**。如果你在找 *Godot 播 RTSP*、*Godot 显示 IP 摄像头*、*Godot 播 MP4* 的方案——
+Godot 自带的 `VideoStreamPlayer` 只认 Theora，这个扩展补上了真正会用到的那几种格式，
+工程里不需要外挂播放器进程。
 
 把发布包里的 `addons/lunastream/` 整个目录复制进你的 Godot 工程即可。这个目录是
 自包含的——扩展动态库、GDExtension 清单与随包的 FFmpeg 动态库都在里面，Linux 版本

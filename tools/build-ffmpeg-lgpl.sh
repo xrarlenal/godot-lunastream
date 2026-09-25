@@ -29,6 +29,19 @@ prefix="${1:-${HOME}/.local/opt/ffmpeg-lgpl}"
 workdir="${FFMPEG_BUILD_DIR:-${HOME}/.local/opt/ffmpeg-lgpl-build}"
 version="${FFMPEG_VERSION:-7.1}"
 
+# macOS 的共享库把"自己是谁"记成一个**路径**（LC_ID_DYLIB），链接它的目标会照抄这个
+# 路径作为依赖。默认这个路径是安装前缀，于是随包发出去的扩展里带的是
+#   /Users/某人/.local/opt/ffmpeg-lgpl/lib/libavformat.61.dylib
+# ——换台机器就找不到库，插件加载失败。
+#
+# `--install-name-dir` 能把这段前缀换掉。这里用 `@loader_path`，含义是"我所在的目录"：
+# 扩展与这几个 FFmpeg 库都在同一个 addons/lunastream/ 目录里，互相按邻居找即可，
+# 连 rpath 都不用设。（Linux 上是 SONAME，与路径无关，这个选项只在 Darwin 有意义。）
+extra_configure=""
+if [ "$(uname -s)" = "Darwin" ]; then
+	extra_configure="--install-name-dir=@loader_path"
+fi
+
 mkdir -p "$workdir"
 cd "$workdir"
 
@@ -60,7 +73,8 @@ cd "ffmpeg-$version"
 	--enable-decoder=av1 \
 	--enable-decoder=mjpeg \
 	--disable-iconv \
-	--disable-sdl2
+	--disable-sdl2 \
+	$extra_configure
 
 make -j"$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 4)"
 make install

@@ -67,6 +67,57 @@ if [ -d "$ffmpeg_prefix/lib" ]; then
 	done
 fi
 
+# 3b. 依赖闭包：把上面这几个库**自己还需要**的 FFmpeg 库也补进来。
+# 实测踩过：libavformat 依赖 libswresample，而上面那份清单里没有它——包在开发机上能跑
+#（前缀里有），换台机器就是 "Library not loaded"。所以扫一遍依赖，缺什么补什么。
+list_deps() {
+	if command -v otool >/dev/null 2>&1; then
+		otool -L "$1" 2>/dev/null
+	else
+		ldd "$1" 2>/dev/null
+	fi
+}
+
+for _pass in 1 2 3; do
+	_added=0
+	for _lib in "$out_dir"/*.dylib "$out_dir"/*.so "$out_dir"/luna_layer/*.so; do
+		[ -e "$_lib" ] || continue
+		for _dep in $(list_deps "$_lib" | awk '{print $1}' | grep -E 'lib(av|sw)'); do
+			_name="$(basename "$_dep")"
+			[ -e "$out_dir/$_name" ] && continue
+			for _cand in "$ffmpeg_prefix/lib/$_name" "$ffmpeg_prefix"/lib/*-linux-gnu/"$_name"; do
+				if [ -e "$_cand" ]; then
+					cp "$_cand" "$out_dir/"
+					echo "补依赖：${_name}（${_lib} 需要）"
+					_added=1
+					break
+				fi
+			done
+		done
+	done
+	[ "$_added" -eq 0 ] && break
+done
+
+# 3c. 自包含性检查：产物里不允许出现指向本机路径的依赖。
+# macOS 的共享库把路径记死在 Mach-O 里，这正是"开发机跑得通、别人加载不了"的来源。
+if command -v otool >/dev/null 2>&1; then
+	_absolute="$(for _lib in "$out_dir"/*.dylib; do
+		[ -e "$_lib" ] || continue
+		otool -L "$_lib" | awk 'NR>1 {print $1}'
+	done | grep -E '^/' | grep -vE '^/(usr/lib|System)/' || true)"
+elif command -v ldd >/dev/null 2>&1; then
+	_absolute=""
+else
+	_absolute=""
+fi
+if [ -n "$_absolute" ]; then
+	echo "" >&2
+	echo "打包中止：产物里还有指向本机路径的依赖，换台机器会加载失败：" >&2
+	printf '  %s\n' $_absolute >&2
+	echo "macOS 上多半是 FFmpeg 的 install name 没指到 @loader_path（见 tools/build-ffmpeg-lgpl.sh）。" >&2
+	exit 1
+fi
+
 # 4. 许可清单（逐库来源与许可证）。
 cat > "$out_dir/LICENSES.md" <<'EOF'
 # 随包分发的第三方组件
