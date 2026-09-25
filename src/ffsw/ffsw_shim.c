@@ -564,12 +564,29 @@ static int is_rtsp_url(const char *url) {
 	return strncasecmp(url, "rtsp://", 7) == 0 || strncasecmp(url, "rtsps://", 8) == 0;
 }
 
+// 哪些协议认 `timeout` / `stimeout` 这两个"连接/会话超时"旋钮。
+//
+// 这件事不能无脑对所有协议都设：**`rtmp://` 里的 `timeout` 是 `listen_timeout`**
+//（监听模式用的那个），塞进去之后打开请求会变成
+//   tcp://host:1935?listen&listen_timeout=<乱数>
+// 于是连不上——实测 `rtmp://95.67.11.153/klive/stream` 就是被我们自己的选项打死
+// 的，而且报错只说 "Cannot open connection"，看不出是选项干的。
+//
+// 超时这件事本身交给 `rw_timeout` 就够：那是 I/O 层的通用旋钮，TCP 也照它办，
+// 且**不会改协议的语义**。所以策略是：rw_timeout 人人有份，这两个只给列出来的协议。
+static int wants_protocol_timeouts(const char *url) {
+	return is_rtsp_url(url) ||
+	       strncasecmp(url, "udp://", 6) == 0 ||
+	       strncasecmp(url, "rtp://", 6) == 0;
+}
+
 // 打开源时用的协议选项。
 //
 // 两件事是刻意的：
 //   * **超时**：实时源必须能收场。没有超时的 av_read_frame 会把解码线程永久
 //     挂住——实测把 UDP 推流停掉之后进程就在那里不动了。rw_timeout 是协议层
-//     的通用旋钮，timeout / stimeout 分别覆盖 udp+rtsp 与旧版 rtsp 的写法。
+//     的通用旋钮，timeout / stimeout 分别覆盖 udp+rtsp 与旧版 rtsp 的写法
+//     （只给这些协议，理由见 wants_protocol_timeouts）。
 //   * **RTSP 一律走 TCP**：UDP 承载在丢包下会让帧碎片化，而且不少摄像机默认
 //     就是 UDP。代价是重传带来的延迟抖动，对"稳定出画"这个目标更划算。
 static AVDictionary *build_open_options(const nv_ffsw_backend *handle, const char *url_or_path) {
@@ -578,8 +595,10 @@ static AVDictionary *build_open_options(const nv_ffsw_backend *handle, const cha
 		char buf[32];
 		snprintf(buf, sizeof(buf), "%lld", (long long)handle->io_timeout_us);
 		av_dict_set(&opts, "rw_timeout", buf, 0);
-		av_dict_set(&opts, "timeout", buf, 0);
-		av_dict_set(&opts, "stimeout", buf, 0);
+		if (wants_protocol_timeouts(url_or_path)) {
+			av_dict_set(&opts, "timeout", buf, 0);
+			av_dict_set(&opts, "stimeout", buf, 0);
+		}
 	}
 	if (is_rtsp_url(url_or_path)) {
 		av_dict_set(&opts, "rtsp_transport", "tcp", 0);
