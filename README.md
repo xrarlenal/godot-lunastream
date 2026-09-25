@@ -1,119 +1,136 @@
 # LunaStream
 
-让 Godot 的 `VideoStreamPlayer` 直接播 `rtsp://`、`http(s)://` 与本地文件：**硬件解码、
-GPU 零拷贝、不依赖任何外部运行时**（不带 VLC / mpv / FFmpeg 进程）。
+[简体中文](README-cn.md)
 
-> 状态：**0.1.0**。macOS 已实现并验证；Windows / Linux 的零拷贝路径已移植并通过
-> 交叉编译，待真机验证（见下表与 [CHANGELOG](CHANGELOG.md)）。
+A Godot 4 GDExtension that gives `VideoStreamPlayer` a `VideoStream` implementation:
+`rtsp://`, `rtmp://`, `http(s)://` and local files play as a source directly, with no
+external player process involved.
 
-## 这是什么
-
-一个极薄的视频**源**，不是播放器。它只负责把网络/LAN 上的视频流变成 Godot 里可采样的
-GPU 纹理，并保证"网口 → 解码 → 纹理"这条链路上没有 CPU 读回、没有落盘、没有外部进程。
-
-音频、字幕、章节、seek、Android / iOS 都明确不做——那些是播放器的职责，属于上层应用。
-
-## 用法
+Copy the `addons/lunastream/` directory from a release package into your Godot project.
+That directory is self-contained — the extension library, the GDExtension manifest and
+the bundled FFmpeg libraries are all in it (the Linux build also ships a Vulkan layer).
+Release packages are produced by `tools/release.sh`; the bundled FFmpeg is an LGPL
+build and can be replaced.
 
 ```gdscript
-var player := VideoStreamPlayer.new()
 var stream := LunaVideoStream.new()
-stream.file = "rtsp://192.168.1.64:8554/stream"   # 也可以是本地路径或 http(s)
+stream.file = "rtsp://192.168.1.64:8554/stream"
+
+var player := VideoStreamPlayer.new()
 player.stream = stream
 add_child(player)
 player.play()
 ```
 
-工程内的媒体文件还可以直接当资源加载（自带资源加载器，认识 mp4 / mov / mkv / webm /
-ts / avi 等容器）：
+`file` accepts a path or a URI; both take the same code path. Media files inside the
+project can also be loaded as resources (a resource loader is included, recognising
+mp4 / mov / mkv / webm / ts / avi containers):
 
 ```gdscript
 var stream := load("res://clip.mp4") as VideoStream
 ```
 
-### 3D 用户：不必为了拿纹理塞一个 Control
+In 3D there is no need for a `Control` node just to get hold of a texture: every frame
+is presented to a `Texture2DRD` that a material can sample directly.
 
 ```gdscript
-stream.texture    # 或 stream.get_texture()
-material.set_shader_parameter("video", stream.get_texture())
+var texture: Texture2D = stream.get_texture()
+material.set_shader_parameter("video", texture)
 ```
 
-### 状态与统计
+Status and statistics:
 
 ```gdscript
-stream.state_changed.connect(func(state): print("状态 -> ", state))
-stream.frame_ready.connect(func(): pass)
-stream.stats_updated.connect(func(stats): print(stats))
+stream.state_changed.connect(func(state: int) -> void: print("state ", state))
+stream.stats_updated.connect(func(stats: Dictionary) -> void: print(stats))
 
-stream.set_output_mode(1)          # 1 = HDR（按帧的传输函数做 PQ/HLG 色调映射）
-stream.set_stall_timeout_ms(2000)  # 多久没新帧算停滞
-stream.set_reconnect_max_attempts(8)
+stream.set_stall_timeout_ms(2000)      # how long without a new frame counts as a stall
+stream.set_reconnect_max_attempts(8)   # reconnect attempts before giving up
+stream.set_output_mode(1)              # 1 = HDR, per-frame PQ / HLG tone mapping
 ```
 
-状态取值与 `core.playback_state.State` 一致：`0 idle / 1 opening / 2 playing /
-3 stalled / 4 failed / 5 off`。
+`state` follows `core.playback_state.State`: `0` idle, `1` opening, `2` playing,
+`3` stalled, `4` failed, `5` off.
 
-## 安装
+## Platform support
 
-把 `addons/lunastream/` 整个目录拷进工程的 `addons/` 下即可（自包含：扩展动态库 +
-随包 FFmpeg + 清单；Linux 还带随包的 Vulkan Layer）。发布包由
-`tools/release.sh` 生成，随包 FFmpeg 是 **LGPL** 构建。
-
-## 平台支持
-
-| 平台 | 驱动 | 硬解 | 零拷贝 | 状态 |
+| Platform | Rendering driver | Decoding | Frame → texture | Status |
 |---|---|---|---|---|
-| macOS | Metal | VideoToolbox | 是 | **已实现并验证**（Apple M1 Pro / Godot 4.6.2） |
-| Windows | D3D12 | D3D11VA | 是 | 已移植、交叉编译通过；待真机验证 |
-| Windows | Vulkan | D3D11VA | 否（每帧一次读回，会如实上报） | 同上 |
-| Linux x86_64 | Vulkan | VAAPI | 是（依赖随包 Layer） | 已移植、交叉编译通过；待真机验证 |
-| 任意 | Compatibility（OpenGL） | — | — | 不支持（没有 CPU 呈现路径） |
-| 任意 | `--headless` | 可解码 | 无纹理 | 只有解码与状态机在跑 |
+| macOS | Metal | FFmpeg software | CPU upload / Metal importer | Playback verified locally (M1 Pro, Godot 4.6.2) |
+| Windows | D3D12 | FFmpeg software | D3D12 importer ported | Cross-compiles; not yet run on hardware |
+| Linux x86_64 | Vulkan | FFmpeg software | dma-buf importer and bundled layer ported | Cross-compiles; not yet run on hardware |
 
-## 它是怎么工作的
+Forward+ or Mobile is required, since the presentation pipeline is built on
+RenderingDevice; Compatibility (OpenGL) has no presentation path. The hardware decoders
+are not implemented yet, so the decoding column is FFmpeg software decoding on every
+platform. What is in place is the **frame import** stage, which wraps the native surface
+produced by a decoder (CoreVideo / D3D12 / dma-buf) into a Godot texture.
+
+## Layout
 
 ```
-rtsp:// · http(s):// · 本地文件
-          │  libavformat（只解封装；RTSP 强制 TCP，可配超时）
-          ▼
-     解码后端（ffsw 软解 / 平台硬解）
-          │  软解给 CPU 平面；硬解给可别名的原生表面
-          ▼
-     导入器（运行时按帧的形状分发：CPU 上传 / Metal 零拷贝 / D3D12 / Vulkan dma-buf）
-          ▼
-     NV12/P010 → RGBA 的共享 compute（数学只在 core 里定义一次）
-          ▼
-     稳定的 Texture2DRD  →  VideoStreamPlayer / ShaderMaterial
+rtsp:// · rtmp:// · http(s):// · local files
+        │  libavformat demuxing (RTSP over TCP, with timeouts)
+        ▼
+   FFmpeg decoding to NV12 / P010
+        │
+        ▼
+   frame import: CPU upload, or a platform surface (Metal / D3D12 / Vulkan dma-buf)
+        │
+        ▼
+   NV12 / P010 → RGBA compute shader (shared by both import paths)
+        │
+        ▼
+   Texture2DRD  →  VideoStreamPlayer / ShaderMaterial
 ```
 
-设计上有两条贯穿始终的原则，都在文档里写明了理由：**能进 core 的逻辑都进 core**
-（因此大部分正确性可以在任何机器上 `zig build test` 验证），**能机器验证的绝不靠肉眼**
-（着色器与 ffmpeg 的输出逐字节比对、HDR 与 core 的数学逐像素比对）。
+Everything that does not depend on the engine or on a GPU — the playback clock, the
+frame queue, the state machine, reconnect scheduling and the colour maths — lives in
+`src/core/` and can be tested on any machine. Platform code lives in `src/ffsw/` (FFmpeg
+decoding), `src/ffvt/` (macOS CoreVideo / Metal), `src/ffva/` (Linux Vulkan dma-buf),
+`src/win/` (Windows D3D12) and `src/vulkan_layer/`.
 
-## 构建与验证
+## Building
 
-需要 **Zig 0.16.0**（精确版本）与一份 Godot 4.6；硬解路径另需 FFmpeg 的开发包。
+Zig 0.16.0 and Godot 4.6 are required.
 
 ```bash
-zig build test                        # core 单测 + C ABI 守卫（不需要 Godot）
-zig build ffsw-selftest               # 解码端到端自检（与 ffmpeg 逐字节比对）
-zig build ffsw-backend-smoke          # 解码后端适配器烟测（不需要 Godot）
-zig build decode-smoke                # 解码烟测，可直接喂 URL
-zig build godot-importer-selftest     # 导入器 + 呈现管线（需要带渲染上下文的 Godot）
-zig build godot-playback-smoke        # 真的播一段流（同上）
-tools/check-licenses.sh               # 许可门槛（GPL 依赖即失败）
-tools/release.sh                      # 打发布包（用自编的 LGPL FFmpeg）
+zig build test                     # core unit tests, no Godot or GPU
+zig build ffsw-selftest            # end-to-end decode self-test, byte-compared with ffmpeg
+zig build decode-smoke             # decode smoke test, takes a URL
+zig build godot-importer-selftest  # importer and presentation pipeline, needs Godot with a rendering context
+zig build godot-playback-smoke     # playback smoke test, same requirement
+tools/check-licenses.sh            # license gate, fails on any GPL dependency
+tools/release.sh                   # build a release package
 ```
 
-## 文档
+## Example
 
-- [PLAN.md](PLAN.md) — 项目规划：定位、技术栈、里程碑、风险
-- [docs/ROADMAP.md](docs/ROADMAP.md) — 功能点推进表（编号即提交序）
-- [docs/features/](docs/features/) — 每个功能点一篇：做了什么、为什么、怎么验证、已知限制
-- [docs/licensing.md](docs/licensing.md) — 随包组件的许可清单与门槛
-- [docs/platform-port.md](docs/platform-port.md) — Windows / Linux 平台代码的来源与验证边界
+`example/demo-net-stream/` is a 2D project that pulls a network stream and hands it to
+`VideoStreamPlayer`, showing the playback state and statistics on screen.
 
-## 许可证
+![RTSP playback](https://ghproxy.net/https://raw.githubusercontent.com/xrarlenal/godot-lunastream/main/example/demo-net-stream/screenshots/01-rtsp-playing.png)
 
-插件本体 MIT。随包分发的 FFmpeg 为 LGPL（动态链接、可替换），不含任何 GPL 组件。
-详见 [docs/licensing.md](docs/licensing.md)。
+![HTTPS playback](https://ghproxy.net/https://raw.githubusercontent.com/xrarlenal/godot-lunastream/main/example/demo-net-stream/screenshots/02-https-public.png)
+
+```bash
+example/demo-net-stream/setup.sh                                   # build the addon into the project
+example/demo-net-stream/serve-rtsp.sh                              # serve an RTSP stream on this machine
+/Applications/Godot.app/Contents/MacOS/Godot --path example/demo-net-stream
+```
+
+Command-line options and the remaining screenshot are in
+[example/demo-net-stream/README.md](example/demo-net-stream/README.md).
+
+## Documentation
+
+- [PLAN.md](PLAN.md) — project plan: scope, toolchain, milestones, risks (Chinese)
+- [docs/ROADMAP.md](docs/ROADMAP.md) — feature list, numbered in commit order (Chinese)
+- [docs/features/](docs/features/) — one document per feature: what it does, why, how it was verified, known limits (Chinese)
+- [docs/licensing.md](docs/licensing.md) — licenses of the bundled components and the gate (Chinese)
+- [docs/platform-port.md](docs/platform-port.md) — origin and verification status of the Windows / Linux code (Chinese)
+
+## License
+
+The plugin itself is MIT. The bundled FFmpeg is an LGPL build (dynamically linked and
+replaceable) and contains no GPL components; see [docs/licensing.md](docs/licensing.md).

@@ -39,7 +39,7 @@ echo "4/4 打 zip"
 rm -rf "$dist_dir"
 mkdir -p "$dist_dir"
 cp -R dist/addons/lunastream "$dist_dir/lunastream"
-cp README.md CHANGELOG.md "$dist_dir/"
+cp README.md README-cn.md CHANGELOG.md "$dist_dir/"
 cp docs/licensing.md "$dist_dir/LICENSING.md"
 # 先删掉旧的 zip：`zip` 是**增量更新**语义，不删的话上一次的条目会留在包里
 #（实测：交叉编译留下的 .dll/.so 就是这么混进 macOS 发布包的）。

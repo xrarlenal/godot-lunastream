@@ -36,5 +36,9 @@ dist/
 # 播放烟测拷进示例工程的片源（构建产物）
 example/gdextension-smoke/clip*.mp4
 
+# demo 工程里由 setup.sh 装进来的插件（库里是平台二进制，别入库；
+# 清单虽然能放进来，但少了库也跑不了，一起交给 setup.sh 生成更不容易过期）
+example/demo-net-stream/addons/
+
 # glslangValidator 复核着色器时的副产物
 *.spv

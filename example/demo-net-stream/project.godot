@@ -1,0 +1,25 @@
+; LunaStream 网络流 Demo。
+;
+; 这是个 **2D** 工程：`VideoStreamPlayer` 本身是 Control，引擎把它当 2D 画出来。
+;
+; 渲染器必须是 Forward+ / Mobile（要 RenderingDevice），Compatibility 那条路
+; 走不了——插件的呈现管线直接建在 RenderingDevice 上，这是它的设计前提。
+
+config_version=5
+
+[application]
+
+config/name="LunaStream 网络流 Demo"
+run/main_scene="res://main.tscn"
+config/features=PackedStringArray("4.6", "Forward Plus")
+
+[audio]
+
+; 插件只做视频（音频、字幕、seek 明确不做），所以这里不需要真的声音设备：
+; 留默认驱动的话，没有音频设备的机器会刷一堆 ALSA/CoreAudio 警告，干扰看日志。
+driver/driver="Dummy"
+
+[display]
+
+window/size/viewport_width=960
+window/size/viewport_height=540
